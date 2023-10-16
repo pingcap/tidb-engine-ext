@@ -40,6 +40,11 @@ impl Store {
         ctx: &mut StoreContext<EK, ER, T>,
     ) -> Result<()> {
         let ssts = box_try!(ctx.sst_importer.list_ssts());
+        // filter old version SSTs
+        let ssts: Vec<_> = ssts
+            .into_iter()
+            .filter(|sst| sst.api_version >= sst_importer::API_VERSION_2)
+            .collect();
         if ssts.is_empty() {
             return Ok(());
         }
@@ -47,9 +52,9 @@ impl Store {
         let mut region_ssts: HashMap<_, Vec<_>> = HashMap::default();
         for sst in ssts {
             region_ssts
-                .entry(sst.get_region_id())
+                .entry(sst.meta.get_region_id())
                 .or_default()
-                .push(sst);
+                .push(sst.meta);
         }
 
         let ranges = ctx.sst_importer.ranges_in_import();

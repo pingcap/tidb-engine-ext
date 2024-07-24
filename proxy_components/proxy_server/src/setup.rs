@@ -33,7 +33,6 @@ pub fn overwrite_config_with_cmd_args(
     matches: &ArgMatches<'_>,
 ) {
     info!("arg matches is {:?}", matches);
-    println!("arg matches is {:?}", matches);
     if let Some(level) = matches.value_of("log-level") {
         config.log.level = logger::get_level_by_string(level).unwrap().into();
         // For backward compating

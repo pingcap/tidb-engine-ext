@@ -125,6 +125,12 @@ pub enum Error {
 
     #[error("resource is not enough {0}")]
     ResourceNotEnough(String),
+
+    #[error("imports are suspended for {time_to_lease_expire:?}")]
+    Suspended { time_to_lease_expire: Duration },
+
+    #[error("TiKV disk space is not enough.")]
+    DiskSpaceNotEnough,
 }
 
 impl Error {
@@ -197,6 +203,10 @@ impl ErrorCodeExt for Error {
             Error::IncompatibleApiVersion => error_code::sst_importer::INCOMPATIBLE_API_VERSION,
             Error::InvalidKeyMode { .. } => error_code::sst_importer::INVALID_KEY_MODE,
             Error::ResourceNotEnough(_) => error_code::sst_importer::RESOURCE_NOT_ENOUTH,
+            Error::Suspended { .. } => error_code::sst_importer::SUSPENDED,
+            Error::RequestTooNew(_) => error_code::sst_importer::REQUEST_TOO_NEW,
+            Error::RequestTooOld(_) => error_code::sst_importer::REQUEST_TOO_OLD,
+            Error::DiskSpaceNotEnough => error_code::sst_importer::DISK_SPACE_NOT_ENOUGH,
         }
     }
 }

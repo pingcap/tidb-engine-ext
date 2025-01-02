@@ -273,6 +273,14 @@ impl Default for ProxyConfig {
             raftdb: RaftDbConfig::default(),
             storage: StorageConfig::default(),
             enable_io_snoop: false,
+            // Previously, we set `memory_usage_high_water` to 0.1, in order to make TiFlash to be
+            // always in a high-water situation. thus by setting
+            // `evict_cache_on_memory_ratio`, we can evict entry cache if there is a memory usage
+            // peak after restart. However there're some cases that the raftstore could
+            // take more than 5% of the total used memory, so TiFlash will reject
+            // msgAppend to every region. So, it actually not a good idea to make
+            // TiFlash Proxy always run in a high-water state, in order to reduce the
+            // memory usage peak after restart.
             readpool: ReadPoolConfig::default(),
             import: ImportConfig::default(),
         }

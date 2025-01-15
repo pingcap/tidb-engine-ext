@@ -27,12 +27,11 @@ use raftstore::{
         config::RaftstoreConfigManager,
         copy_snapshot,
         fsm::{store::StoreMeta, RaftBatchSystem, RaftRouter},
-        AutoSplitController, Callback, LocalReader, RaftCmdExtraOpts, SnapEntry, SnapKey,
-        SnapManager, SnapManagerBuilder, SplitCheckRunner, StoreMetaDelegate, Transport,
+        AutoSplitController, Callback, DiskCheckRunner, LocalReader, RaftCmdExtraOpts, SnapEntry,
+        SnapKey, SnapManager, SnapManagerBuilder, SplitCheckRunner, StoreMetaDelegate, Transport,
     },
     Result,
 };
-use raftstore::store::DiskCheckRunner;
 use resource_metering::CollectorRegHandle;
 use service::service_manager::GrpcServiceManager;
 use tempfile::TempDir;

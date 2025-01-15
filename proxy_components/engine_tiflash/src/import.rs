@@ -1,5 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
-
+#![allow(unreachable_code)]
+#![allow(unused_variables)]
 use engine_traits::{ImportExt, IngestExternalFileOptions, Result};
 use rocksdb::IngestExternalFileOptions as RawIngestExternalFileOptions;
 use tikv_util::time::Instant;
@@ -14,7 +15,7 @@ impl ImportExt for RocksEngine {
     fn ingest_external_file_cf(&self, cf_name: &str, files: &[&str]) -> Result<()> {
         // do nothing
         return Ok(());
-        
+
         let cf = util::get_cf_handle(self.as_inner(), cf_name)?;
         let mut opts = RocksIngestExternalFileOptions::new();
         opts.move_files(true);

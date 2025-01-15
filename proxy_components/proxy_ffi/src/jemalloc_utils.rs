@@ -30,6 +30,7 @@ extern "C" {
 #[allow(unused_variables)]
 #[allow(unused_mut)]
 #[allow(unused_unsafe)]
+#[allow(unreachable_code)]
 pub fn issue_mallctl_args(
     command: &str,
     oldptr: *mut ::std::os::raw::c_void,

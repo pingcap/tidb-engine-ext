@@ -1,8 +1,5 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-#![allow(unused_variables)]
-#![allow(unreachable_code)]
-
 use engine_traits::{ImportExt, IngestExternalFileOptions, Result};
 use rocksdb::IngestExternalFileOptions as RawIngestExternalFileOptions;
 use tikv_util::time::Instant;

@@ -104,3 +104,71 @@ fn test_safe_ts_basic() {
 
     suite.stop();
 }
+
+#[test]
+fn test_raft_message_observer() {
+    let mut cluster = new_server_cluster(0, 3);
+    cluster.pd_client.disable_default_operator();
+    let r1 = cluster.run_conf_change();
+
+    cluster.must_put(b"k1", b"v1");
+
+    fail::cfg("tiflash_force_reject_raft_append_message", "return").unwrap();
+    fail::cfg("tiflash_force_reject_raft_snapshot_message", "return").unwrap();
+
+    cluster.pd_client.add_peer(r1, new_peer(2, 2));
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    check_key(
+        &cluster,
+        b"k1",
+        b"v",
+        Some(false),
+        Some(false),
+        Some(vec![2]),
+    );
+
+    fail::remove("tiflash_force_reject_raft_append_message");
+    fail::remove("tiflash_force_reject_raft_snapshot_message");
+
+    cluster.pd_client.must_have_peer(r1, new_peer(2, 2));
+    cluster.pd_client.must_add_peer(r1, new_peer(3, 3));
+
+    check_key(
+        &cluster,
+        b"k1",
+        b"v1",
+        Some(true),
+        Some(true),
+        Some(vec![2, 3]),
+    );
+
+    fail::cfg("tiflash_force_reject_raft_append_message", "return").unwrap();
+
+    let _ = cluster.async_put(b"k2", b"v2").unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    check_key(
+        &cluster,
+        b"k3",
+        b"v3",
+        Some(false),
+        Some(false),
+        Some(vec![2, 3]),
+    );
+
+    fail::remove("tiflash_force_reject_raft_append_message");
+
+    cluster.must_put(b"k3", b"v3");
+    check_key(
+        &cluster,
+        b"k3",
+        b"v3",
+        Some(true),
+        Some(true),
+        Some(vec![1, 2, 3]),
+    );
+    cluster.shutdown();
+}

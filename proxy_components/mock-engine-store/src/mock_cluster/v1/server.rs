@@ -31,6 +31,7 @@ use kvproto::{
     tikvpb::TikvClient,
 };
 use pd_client::PdClient;
+use proxy_server::run::TiFlashGrpcMessageFilter;
 use raftstore::{
     coprocessor::{CoprocessorHost, RegionInfoAccessor},
     errors::Error as RaftError,
@@ -547,6 +548,9 @@ impl ServerCluster {
                 debug_thread_pool.clone(),
                 health_controller.clone(),
                 None,
+                Arc::new(TiFlashGrpcMessageFilter::new(
+                    server_cfg.value().reject_messages_on_memory_ratio,
+                )),
             )
             .unwrap();
             svr.register_service(create_import_sst(import_service.clone()));

@@ -39,14 +39,12 @@ use tikv_util::{
     },
     future::RescheduleChecker,
     memory::{MemoryQuota, OwnedAllocated},
+    resizable_threadpool::DeamonRuntimeHandle,
     sys::{thread::ThreadBuildWrapper, SysQuota},
     time::{Instant, Limiter},
     Either, HandyRwLock,
 };
-use tokio::{
-    runtime::{Handle, Runtime},
-    sync::OnceCell,
-};
+use tokio::{runtime::Runtime, sync::OnceCell};
 use txn_types::{Key, TimeStamp, WriteRef};
 
 use crate::{
@@ -267,10 +265,10 @@ impl<E: KvEngine> SstImporter<E> {
         }
     }
 
-    pub fn start_switch_mode_check(&self, executor: &Handle, db: Option<E>) {
+    pub fn start_switch_mode_check(&self, executor: &DeamonRuntimeHandle, db: Option<E>) {
         match &self.switcher {
-            Either::Left(switcher) => switcher.start(executor, db.unwrap()),
-            Either::Right(switcher) => switcher.start(executor),
+            Either::Left(switcher) => switcher.start_resizable_threads(executor, db.unwrap()),
+            Either::Right(switcher) => switcher.start_resizable_threads(executor),
         }
     }
 
@@ -1233,6 +1231,8 @@ impl<E: KvEngine> SstImporter<E> {
         let direct_retval = (|| -> Result<Option<_>> {
             if rewrite_rule.old_key_prefix != rewrite_rule.new_key_prefix
                 || rewrite_rule.new_timestamp != 0
+                || rewrite_rule.ignore_after_timestamp != 0
+                || rewrite_rule.ignore_before_timestamp != 0
             {
                 // must iterate if we perform key rewrite
                 return Ok(None);
@@ -1359,6 +1359,29 @@ impl<E: KvEngine> SstImporter<E> {
 
             let mut value = Cow::Borrowed(iter.value());
 
+            if rewrite_rule.ignore_after_timestamp != 0 {
+                let ts = Key::decode_ts_from(iter.key())?;
+                if ts > TimeStamp::new(rewrite_rule.ignore_after_timestamp) {
+                    iter.next()?;
+                    INPORTER_DOWNLOAD_COMPACT_KEYS_COUNT
+                        .with_label_values(&["after"])
+                        .inc();
+                    continue;
+                }
+            }
+            if rewrite_rule.ignore_before_timestamp != 0 {
+                // Let the client decide the ts here for default/write CF.
+                // Normally the ts in default CF is less than the ts in write CF.
+                let ts = Key::decode_ts_from(iter.key())?;
+                if ts < TimeStamp::new(rewrite_rule.ignore_before_timestamp) {
+                    iter.next()?;
+                    INPORTER_DOWNLOAD_COMPACT_KEYS_COUNT
+                        .with_label_values(&["before"])
+                        .inc();
+                    continue;
+                }
+            }
+
             if rewrite_rule.new_timestamp != 0 {
                 data_key = Key::from_encoded(data_key)
                     .truncate_ts()
@@ -1371,7 +1394,7 @@ impl<E: KvEngine> SstImporter<E> {
                     })?
                     .append_ts(TimeStamp::new(rewrite_rule.new_timestamp))
                     .into_encoded();
-                if meta.get_cf_name() == CF_WRITE {
+                if cf_name == CF_WRITE {
                     let mut write = WriteRef::parse(iter.value()).map_err(|e| {
                         Error::BadFormat(format!(
                             "write {}: {}",
@@ -1429,7 +1452,12 @@ impl<E: KvEngine> SstImporter<E> {
         self.dir.list_ssts()
     }
 
-    pub fn new_txn_writer(&self, db: &E, meta: SstMeta) -> Result<TxnSstWriter<E>> {
+    pub fn new_txn_writer(
+        &self,
+        db: &E,
+        meta: SstMeta,
+        txn_source: u64,
+    ) -> Result<TxnSstWriter<E>> {
         let mut default_meta = meta.clone();
         default_meta.set_cf_name(CF_DEFAULT.to_owned());
         let default_path = self.dir.join_for_write(&default_meta)?;
@@ -1459,10 +1487,11 @@ impl<E: KvEngine> SstImporter<E> {
             write_meta,
             self.key_manager.clone(),
             self.api_version,
+            txn_source,
         ))
     }
 
-    pub fn new_raw_writer(&self, db: &E, mut meta: SstMeta) -> Result<RawSstWriter<E>> {
+    pub fn new_raw_writer(&self, db: &E, mut meta: SstMeta, _: u64) -> Result<RawSstWriter<E>> {
         meta.set_cf_name(CF_DEFAULT.to_owned());
         let default_path = self.dir.join_for_write(&meta)?;
         let default = E::SstWriterBuilder::new()
@@ -1618,6 +1647,10 @@ mod tests {
     use std::{
         io::{self, Cursor},
         ops::Sub,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex,
+        },
         usize,
     };
 
@@ -1641,7 +1674,10 @@ mod tests {
     use tempfile::{Builder, TempDir};
     use test_sst_importer::*;
     use test_util::new_test_key_manager;
-    use tikv_util::{codec::stream_event::EventEncoder, stream::block_on_external_io};
+    use tikv_util::{
+        codec::stream_event::EventEncoder, resizable_threadpool::ResizableRuntime,
+        stream::block_on_external_io,
+    };
     use tokio::io::{AsyncWrite, AsyncWriteExt};
     use tokio_util::compat::{FuturesAsyncWriteCompatExt, TokioAsyncWriteCompatExt};
     use txn_types::{Value, WriteType};
@@ -1649,6 +1685,15 @@ mod tests {
 
     use super::*;
     use crate::{import_file::ImportPath, *};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    type TokioResult<T> = std::io::Result<T>;
+
+    fn create_tokio_runtime(_: usize, _: &str) -> TokioResult<Runtime> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+    }
 
     fn do_test_import_dir(key_manager: Option<Arc<DataKeyManager>>) {
         let temp_dir = Builder::new().prefix("test_import_dir").tempdir().unwrap();
@@ -2120,6 +2165,19 @@ mod tests {
         Ok((ext_sst_dir, backend, meta))
     }
 
+    fn new_compacted_file_rewrite_rule(
+        old_key_prefix: &[u8],
+        new_key_prefix: &[u8],
+        new_timestamp: u64,
+        ignore_before_timestamp: u64,
+        ignore_after_timestamp: u64,
+    ) -> RewriteRule {
+        let mut rule = new_rewrite_rule(old_key_prefix, new_key_prefix, new_timestamp);
+        rule.ignore_before_timestamp = ignore_before_timestamp;
+        rule.ignore_after_timestamp = ignore_after_timestamp;
+        rule
+    }
+
     fn new_rewrite_rule(
         old_key_prefix: &[u8],
         new_key_prefix: &[u8],
@@ -2288,8 +2346,17 @@ mod tests {
         };
         let change = cfg.diff(&cfg_new);
 
+        let threads = ResizableRuntime::new(
+            cfg.num_threads,
+            "test",
+            Box::new(create_tokio_runtime),
+            Box::new(|_| {}),
+        );
+
+        let threads_clone = Arc::new(Mutex::new(threads));
+
         // create config manager and update config.
-        let mut cfg_mgr = ImportConfigManager::new(cfg);
+        let mut cfg_mgr = ImportConfigManager::new(cfg, Arc::downgrade(&threads_clone));
         cfg_mgr.dispatch(change).unwrap();
         importer.update_config_memory_use_ratio(&cfg_mgr);
 
@@ -2312,9 +2379,48 @@ mod tests {
             ..Default::default()
         };
         let change = cfg.diff(&cfg_new);
-        let mut cfg_mgr = ImportConfigManager::new(cfg);
+
+        let threads = ResizableRuntime::new(
+            cfg.num_threads,
+            "test",
+            Box::new(create_tokio_runtime),
+            Box::new(|_| {}),
+        );
+
+        let threads_clone = Arc::new(Mutex::new(threads));
+
+        let mut cfg_mgr = ImportConfigManager::new(cfg, Arc::downgrade(&threads_clone));
         let r = cfg_mgr.dispatch(change);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn test_update_import_num_threads() {
+        let cfg = Config::default();
+        let threads = ResizableRuntime::new(
+            Config::default().num_threads,
+            "test",
+            Box::new(create_tokio_runtime),
+            Box::new(|new_size: usize| {
+                COUNTER.store(new_size, Ordering::SeqCst);
+            }),
+        );
+
+        let threads_clone = Arc::new(Mutex::new(threads));
+        let mut cfg_mgr = ImportConfigManager::new(cfg, Arc::downgrade(&threads_clone));
+
+        assert_eq!(cfg_mgr.rl().num_threads, Config::default().num_threads);
+
+        let cfg_new = Config {
+            num_threads: 10,
+            ..Default::default()
+        };
+        let change = Config::default().diff(&cfg_new);
+        let r = cfg_mgr.dispatch(change);
+
+        r.unwrap();
+        assert_eq!(cfg_mgr.rl().num_threads, cfg_new.num_threads);
+        assert_eq!(COUNTER.load(Ordering::SeqCst), cfg_mgr.rl().num_threads);
     }
 
     #[test]
@@ -2783,6 +2889,206 @@ mod tests {
                 (get_encoded_key(b"t123_r07", 16), b"pqrst".to_vec()),
             ]
         );
+    }
+    #[test]
+    fn test_download_compacted_sst_with_key_rewrite_ts_default() {
+        // performs the download.
+        let importer_dir = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+        let importer =
+            SstImporter::<TestEngine>::new(&cfg, &importer_dir, None, ApiVersion::V1, false)
+                .unwrap();
+
+        // creates a sample SST file.
+        let (_ext_sst_dir, backend, meta) = create_sample_external_sst_file_txn_default().unwrap();
+        let db = create_sst_test_engine().unwrap();
+        let downloads = vec![
+            (
+                // no filter
+                new_compacted_file_rewrite_rule(b"t123", b"t567", 0, 0, 0),
+                vec![
+                    (get_encoded_key(b"t567_r01", 1), b"abc".to_vec()),
+                    (get_encoded_key(b"t567_r04", 3), b"xyz".to_vec()),
+                    (get_encoded_key(b"t567_r07", 7), b"pqrst".to_vec()),
+                ],
+            ),
+            (
+                // filter key between ts range [2, 6],
+                new_compacted_file_rewrite_rule(b"t123", b"t123", 0, 2, 6),
+                vec![(get_encoded_key(b"t123_r04", 3), b"xyz".to_vec())],
+            ),
+            (
+                // filter key between ts range [7, 18]
+                new_compacted_file_rewrite_rule(b"t123", b"t567", 0, 7, 18),
+                vec![(get_encoded_key(b"t567_r07", 7), b"pqrst".to_vec())],
+            ),
+        ];
+        for case in downloads {
+            let _ = importer
+                .download(
+                    &meta,
+                    &backend,
+                    "sample_default.sst",
+                    &case.0,
+                    None,
+                    Limiter::new(f64::INFINITY),
+                    db.clone(),
+                )
+                .unwrap()
+                .unwrap();
+
+            // verifies that the file is saved to the correct place.
+            // (the file size may be changed, so not going to check the file size)
+            let sst_file_path = importer.dir.join_for_read(&meta).unwrap().save;
+            assert!(sst_file_path.is_file());
+
+            // verifies the SST content is correct.
+            let sst_reader = new_sst_reader(sst_file_path.to_str().unwrap(), None);
+            sst_reader.verify_checksum().unwrap();
+            let mut iter = sst_reader.iter(IterOptions::default()).unwrap();
+            iter.seek_to_first().unwrap();
+            assert_eq!(collect(iter), case.1);
+        }
+    }
+
+    #[test]
+    fn test_download_compacted_sst_with_key_rewrite_ts_write() {
+        // performs the download.
+        let importer_dir = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+        let importer =
+            SstImporter::<TestEngine>::new(&cfg, &importer_dir, None, ApiVersion::V1, false)
+                .unwrap();
+
+        // creates a sample SST file.
+        let (_ext_sst_dir, backend, meta) = create_sample_external_sst_file_txn_write().unwrap();
+        let db = create_sst_test_engine().unwrap();
+        let downloads = vec![
+            (
+                // filter key between ts range [4, 8]
+                new_compacted_file_rewrite_rule(b"t123", b"t567", 0, 4, 8),
+                vec![
+                    (
+                        get_encoded_key(b"t567_r01", 5),
+                        get_write_value(WriteType::Put, 1, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r02", 5),
+                        get_write_value(WriteType::Delete, 1, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r04", 4),
+                        get_write_value(WriteType::Put, 3, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r07", 8),
+                        get_write_value(WriteType::Put, 7, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r13", 8),
+                        get_write_value(WriteType::Put, 7, Some(b"www".to_vec())),
+                    ),
+                ],
+            ),
+            (
+                // filter key between ts range [5, 6]
+                new_compacted_file_rewrite_rule(b"t123", b"t567", 0, 5, 6),
+                vec![
+                    (
+                        get_encoded_key(b"t567_r01", 5),
+                        get_write_value(WriteType::Put, 1, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r02", 5),
+                        get_write_value(WriteType::Delete, 1, None),
+                    ),
+                ],
+            ),
+            (
+                // filter key between ts range [4, 5]
+                new_compacted_file_rewrite_rule(b"t123", b"t567", 0, 4, 5),
+                vec![
+                    (
+                        get_encoded_key(b"t567_r01", 5),
+                        get_write_value(WriteType::Put, 1, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r02", 5),
+                        get_write_value(WriteType::Delete, 1, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r04", 4),
+                        get_write_value(WriteType::Put, 3, None),
+                    ),
+                ],
+            ),
+            (
+                // no filter
+                new_compacted_file_rewrite_rule(b"t123", b"t567", 0, 0, 0),
+                vec![
+                    (
+                        get_encoded_key(b"t567_r01", 5),
+                        get_write_value(WriteType::Put, 1, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r02", 5),
+                        get_write_value(WriteType::Delete, 1, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r04", 4),
+                        get_write_value(WriteType::Put, 3, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r07", 8),
+                        get_write_value(WriteType::Put, 7, None),
+                    ),
+                    (
+                        get_encoded_key(b"t567_r13", 8),
+                        get_write_value(WriteType::Put, 7, Some(b"www".to_vec())),
+                    ),
+                ],
+            ),
+            (
+                // no rewrite rule, but has filter ts range [5, 5]
+                new_compacted_file_rewrite_rule(b"t123", b"t123", 0, 5, 5),
+                vec![
+                    (
+                        get_encoded_key(b"t123_r01", 5),
+                        get_write_value(WriteType::Put, 1, None),
+                    ),
+                    (
+                        get_encoded_key(b"t123_r02", 5),
+                        get_write_value(WriteType::Delete, 1, None),
+                    ),
+                ],
+            ),
+        ];
+        for case in downloads {
+            let _ = importer
+                .download(
+                    &meta,
+                    &backend,
+                    "sample_write.sst",
+                    &case.0,
+                    None,
+                    Limiter::new(f64::INFINITY),
+                    db.clone(),
+                )
+                .unwrap()
+                .unwrap();
+
+            // verifies that the file is saved to the correct place.
+            // (the file size may be changed, so not going to check the file size)
+            let sst_file_path = importer.dir.join_for_read(&meta).unwrap().save;
+            assert!(sst_file_path.is_file());
+
+            // verifies the SST content is correct.
+            let sst_reader = new_sst_reader(sst_file_path.to_str().unwrap(), None);
+            sst_reader.verify_checksum().unwrap();
+            let mut iter = sst_reader.iter(IterOptions::default()).unwrap();
+            iter.seek_to_first().unwrap();
+            assert_eq!(collect(iter), case.1);
+        }
     }
 
     #[test]
@@ -3331,7 +3637,7 @@ mod tests {
         let db_path = importer_dir.path().join("db");
         let db = new_test_engine(db_path.to_str().unwrap(), DATA_CFS);
 
-        let mut w = importer.new_txn_writer(&db, meta).unwrap();
+        let mut w = importer.new_txn_writer(&db, meta, 0).unwrap();
         let mut batch = WriteBatch::default();
         let mut pairs = vec![];
 

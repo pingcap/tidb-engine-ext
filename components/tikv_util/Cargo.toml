@@ -48,7 +48,6 @@ prometheus = { version = "0.13", features = ["nightly"] }
 prometheus-static-metric = "0.5"
 protobuf = "2"
 rand = "0.8"
-rusoto_core = "0.46.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 slog = { workspace = true }
@@ -61,9 +60,10 @@ sysinfo = "0.26"
 thiserror = "1.0"
 tikv_alloc = { workspace = true }
 time = { workspace = true }
-tokio = { version = "1.5", features = ["rt-multi-thread"] }
+tokio = { version = "1.5", features = ["rt-multi-thread","time", "rt", "macros", "sync", "full"] }
 tokio-executor = { workspace = true }
 tokio-timer = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracker = { workspace = true }
 url = "2"
 yatp = { workspace = true }

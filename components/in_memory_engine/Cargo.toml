@@ -61,3 +61,4 @@ proptest = "1.0.0"
 tempfile = "3.0"
 test_pd = { workspace = true }
 test_util = { workspace = true }
+tikv_alloc = { workspace = true, features = ["jemalloc"] }

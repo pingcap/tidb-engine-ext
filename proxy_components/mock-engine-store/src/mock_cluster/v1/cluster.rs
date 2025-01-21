@@ -10,7 +10,6 @@ use std::{
 
 use collections::{HashMap, HashSet};
 use encryption::DataKeyManager;
-use engine_traits::Iterator;
 // mock cluster
 use engine_traits::{Engines, KvEngine, CF_DEFAULT};
 use file_system::IoRateLimiter;
@@ -79,7 +78,7 @@ impl Drop for CallbackLeakDetector {
 
         debug!("before capture");
         let bt = std::backtrace::Backtrace::capture();
-        warn!("callback is dropped"; "backtrace" => ?bt);
+        debug!("callback is dropped"; "backtrace" => ?bt);
     }
 }
 

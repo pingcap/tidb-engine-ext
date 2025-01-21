@@ -49,6 +49,7 @@ use kvproto::{
     raft_serverpb::RaftMessage,
 };
 use pd_client::{PdClient, RpcClient};
+use raft::eraftpb::MessageType;
 use raft_log_engine::RaftLogEngine;
 use raftstore::{
     coprocessor::{config::SplitCheckConfigManager, CoprocessorHost, RegionInfoAccessor},
@@ -139,15 +140,20 @@ impl TiFlashGrpcMessageFilter {
 }
 
 impl RaftGrpcMessageFilter for TiFlashGrpcMessageFilter {
-    fn should_reject_raft_message(&self, _: &RaftMessage) -> bool {
+    fn should_reject_raft_message(&self, m: &RaftMessage) -> bool {
         fail::fail_point!("tiflash_force_reject_raft_append_message", |_| true);
 
         if self.reject_messages_on_memory_ratio < f64::EPSILON {
             return false;
         }
 
+        if m.get_message().get_msg_type() != MessageType::MsgAppend {
+            return false;
+        }
+
         let mut usage = 0;
-        memory_usage_reaches_high_water(&mut usage)
+        let b = memory_usage_reaches_high_water(&mut usage);
+        b
     }
 
     fn should_reject_snapshot(&self) -> bool {
@@ -158,7 +164,8 @@ impl RaftGrpcMessageFilter for TiFlashGrpcMessageFilter {
         }
 
         let mut usage = 0;
-        memory_usage_reaches_high_water(&mut usage)
+        let b = memory_usage_reaches_high_water(&mut usage);
+        b
     }
 }
 

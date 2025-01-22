@@ -27,8 +27,8 @@ use raftstore::{
         config::RaftstoreConfigManager,
         copy_snapshot,
         fsm::{store::StoreMeta, RaftBatchSystem, RaftRouter},
-        AutoSplitController, Callback, LocalReader, RaftCmdExtraOpts, SnapEntry, SnapKey,
-        SnapManager, SnapManagerBuilder, SplitCheckRunner, StoreMetaDelegate, Transport,
+        AutoSplitController, Callback, DiskCheckRunner, LocalReader, RaftCmdExtraOpts, SnapEntry,
+        SnapKey, SnapManager, SnapManagerBuilder, SplitCheckRunner, StoreMetaDelegate, Transport,
     },
     Result,
 };
@@ -405,6 +405,7 @@ impl Simulator<TiFlashEngine> for NodeCluster {
             cm,
             CollectorRegHandle::new_for_test(),
             None,
+            DiskCheckRunner::dummy(),
             GrpcServiceManager::dummy(),
             safe_point,
         )?;

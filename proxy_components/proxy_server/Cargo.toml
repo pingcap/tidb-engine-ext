@@ -82,7 +82,7 @@ online_config = { workspace = true }
 openssl = { workspace = true }
 pd_client = { workspace = true }
 pin-project = "1.0"
-pprof = { version = "0.13", default-features = false, features = [
+pprof = { version = "0.14", default-features = false, features = [
   "flamegraph",
   "protobuf-codec",
   "cpp",

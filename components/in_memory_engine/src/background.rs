@@ -458,11 +458,6 @@ impl BackgroundRunnerCore {
     /// Returns empty vector if there are no regions cached or the previous gc
     /// is not finished.
     fn regions_for_gc(&self) -> Vec<CacheRegion> {
-        // another gc task is running, skipped.
-        if !self.engine.region_manager().try_set_regions_in_gc(true) {
-            return vec![];
-        }
-
         let regions_map = self.engine.region_manager().regions_map.read();
         regions_map
             .regions()
@@ -698,6 +693,9 @@ impl BackgroundRunnerCore {
             }
         };
         if !region_stats_manager.ready_for_auto_load_and_evict() {
+            info!(
+                "ime skip check load&evict because the duration from last load&evict check is too short."
+            );
             return;
         }
 
@@ -760,7 +758,7 @@ impl BackgroundRunnerCore {
         if !self.memory_controller.reached_stop_load_threshold() {
             let expected_new_count = self
                 .memory_controller
-                .evict_threshold()
+                .stop_load_threshold()
                 .saturating_sub(self.memory_controller.mem_usage())
                 / region_stats_manager.expected_region_size();
             let expected_new_count = usize::max(expected_new_count, 1);
@@ -780,16 +778,8 @@ impl BackgroundRunnerCore {
 // Flush epoch and pin enough times to make the delayed operations be executed
 #[cfg(test)]
 pub(crate) fn flush_epoch() {
-    {
-        let guard = &epoch::pin();
-        guard.flush();
-    }
-    // Local epoch tries to advance the global epoch every 128 pins. When global
-    // epoch advances, the operations(here, means delete) in the older epoch can be
-    // executed.
-    for _ in 0..128 {
-        let _ = &epoch::pin();
-    }
+    let guard = &epoch::pin();
+    guard.flush();
 }
 
 pub struct BackgroundRunner {
@@ -1105,6 +1095,10 @@ impl Runnable for BackgroundRunner {
                     "oldest_sequence" => seqno,
                 );
                 let core = self.core.clone();
+                // another gc task is running, skipped.
+                if !core.engine.region_manager().try_set_regions_in_gc(true) {
+                    return;
+                }
                 let regions = core.regions_for_gc();
                 if !regions.is_empty() {
                     let f = async move {
@@ -2868,15 +2862,37 @@ pub mod tests {
             Arc::new(MockPdClient {}),
             None,
         );
+        assert!(
+            runner
+                .core
+                .engine
+                .region_manager()
+                .try_set_regions_in_gc(true)
+        );
         let regions = runner.core.regions_for_gc();
         assert_eq!(2, regions.len());
 
-        // until the previous gc finished, node regions will be returned
-        assert!(runner.core.regions_for_gc().is_empty());
+        // try run another gc task will return false.
+        assert!(
+            !runner
+                .core
+                .engine
+                .region_manager()
+                .try_set_regions_in_gc(true)
+        );
+        // finished the current gc task.
         runner.core.on_gc_finished();
 
+        assert!(
+            runner
+                .core
+                .engine
+                .region_manager()
+                .try_set_regions_in_gc(true)
+        );
         let regions = runner.core.regions_for_gc();
         assert_eq!(2, regions.len());
+        runner.core.on_gc_finished();
     }
 
     #[derive(Default)]

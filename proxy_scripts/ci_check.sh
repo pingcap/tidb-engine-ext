@@ -24,7 +24,7 @@ elif [[ $M == "testold" ]]; then
     echo "Finish tikv code consistency"
     exit # If we depend TiKV as a Cargo component, the following is not necessary, and can fail.
     # TODO we have to let tests support openssl-vendored.
-    yum install openssl openssl-devel -y
+    # TiKV uses openssl 1.x currently, so do not install openssl 3.x
     cargo test --features "$ENABLE_FEATURES" --package tests --test failpoints cases::test_normal
     cargo test --features "$ENABLE_FEATURES" --package tests --test failpoints cases::test_bootstrap
     cargo test --features "$ENABLE_FEATURES" --package tests --test failpoints cases::test_compact_log
@@ -44,6 +44,7 @@ elif [[ $M == "testnew" ]]; then
     export ENGINE_LABEL_VALUE=tiflash
     export RUST_BACKTRACE=full
     export ENABLE_FEATURES="test-engine-kv-rocksdb test-engine-raft-raft-engine openssl-vendored"
+    export LOG_LEVEL=INFO
     cargo check --package proxy_server --features="$ENABLE_FEATURES"
     # tests based on mock-engine-store, with compat for new proxy
     LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::jemalloc --features="jemalloc"

@@ -46,8 +46,10 @@ use health_controller::HealthController;
 use in_memory_engine::InMemoryEngineStatistics;
 use kvproto::{
     debugpb::create_debug, diagnosticspb::create_diagnostics, import_sstpb::create_import_sst,
+    raft_serverpb::RaftMessage,
 };
 use pd_client::{PdClient, RpcClient};
+use raft::eraftpb::MessageType;
 use raft_log_engine::RaftLogEngine;
 use raftstore::{
     coprocessor::{config::SplitCheckConfigManager, CoprocessorHost, RegionInfoAccessor},
@@ -84,7 +86,7 @@ use tikv::{
         gc_worker::GcWorker,
         raftkv::ReplicaReadLockChecker,
         resolve,
-        service::{DebugService, DiagnosticsService},
+        service::{DebugService, DiagnosticsService, RaftGrpcMessageFilter},
         tablet_snap::NoSnapshotCache,
         ttl::TtlChecker,
         KvEngineFactoryBuilder, MultiRaftServer, RaftKv, Server, CPU_CORES_QUOTA_GAUGE,
@@ -106,7 +108,10 @@ use tikv_util::{
     config::{ensure_dir_exist, ReadableDuration, VersionTrack},
     error,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
-    sys::{disk, register_memory_usage_high_water, thread::ThreadBuildWrapper, SysQuota},
+    sys::{
+        disk, memory_usage_reaches_high_water, register_memory_usage_high_water,
+        thread::ThreadBuildWrapper, SysQuota,
+    },
     thread_group::GroupProperties,
     time::{Instant, Monitor},
     worker::{Builder as WorkerBuilder, LazyWorker, Scheduler},
@@ -120,6 +125,47 @@ use crate::{
     hacked_lock_mgr::HackedLockManager as LockManager, setup::*, status_server::StatusServer,
     util::ffi_server_info,
 };
+
+#[derive(Clone)]
+pub struct TiFlashGrpcMessageFilter {
+    reject_messages_on_memory_ratio: f64,
+}
+
+impl TiFlashGrpcMessageFilter {
+    pub fn new(reject_messages_on_memory_ratio: f64) -> Self {
+        Self {
+            reject_messages_on_memory_ratio,
+        }
+    }
+}
+
+impl RaftGrpcMessageFilter for TiFlashGrpcMessageFilter {
+    fn should_reject_raft_message(&self, m: &RaftMessage) -> bool {
+        fail::fail_point!("tiflash_force_reject_raft_append_message", |_| true);
+
+        if self.reject_messages_on_memory_ratio < f64::EPSILON {
+            return false;
+        }
+
+        if m.get_message().get_msg_type() != MessageType::MsgAppend {
+            return false;
+        }
+
+        let mut usage = 0;
+        memory_usage_reaches_high_water(&mut usage)
+    }
+
+    fn should_reject_snapshot(&self) -> bool {
+        fail::fail_point!("tiflash_force_reject_raft_snapshot_message", |_| true);
+
+        if self.reject_messages_on_memory_ratio < f64::EPSILON {
+            return false;
+        }
+
+        let mut usage = 0;
+        memory_usage_reaches_high_water(&mut usage)
+    }
+}
 
 #[inline]
 pub fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(
@@ -1276,6 +1322,9 @@ impl<ER: RaftEngine, F: KvFormat> TiKvServer<ER, F> {
             debug_thread_pool,
             health_controller,
             self.resource_manager.clone(),
+            Arc::new(TiFlashGrpcMessageFilter::new(
+                server_config.value().reject_messages_on_memory_ratio,
+            )),
         )
         .unwrap_or_else(|e| fatal!("failed to create server: {}", e));
 

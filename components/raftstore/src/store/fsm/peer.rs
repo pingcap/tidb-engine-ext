@@ -679,7 +679,7 @@ where
             }
             distribution[m.discriminant()] += 1;
             match m {
-                PeerMsg::RaftMessage(msg, sent_time) => {
+                PeerMsg::RaftMessage(mut msg, sent_time) => {
                     if let Some(sent_time) = sent_time {
                         let wait_time = sent_time.saturating_elapsed().as_secs_f64();
                         self.ctx.raft_metrics.process_wait_time.observe(wait_time);
@@ -689,6 +689,36 @@ where
                         continue;
                     }
 
+                    info!("!!!!!! handle_msgs 11111");
+                    let modify_msg: bool = (|| {
+                        fail::fail_point!("mock_overlapped_region_1", |t| {
+                            let t = t.unwrap().parse::<u64>().unwrap();
+                            t
+                        });
+                        0
+                    })() != 0;
+
+                    info!("!!!!!! handle_msgs 22222");
+                    if modify_msg {
+                        if msg.msg.get_message().get_msg_type() == raft::eraftpb::MessageType::MsgSnapshot &&
+                            msg.msg.get_to_peer().get_store_id() == 2 && 
+                            msg.msg.region_id == 1
+                        {
+                            info!("!!!!! origin {:?}", msg.msg);
+                            let mut msg2 = msg.msg.clone();
+                            let mut snapshot = msg.msg.get_message().get_snapshot();
+                            let snapshot_data = snapshot.get_data();
+                            let mut parsed_data = kvproto::raft_serverpb::RaftSnapshotData::default();
+                            parsed_data.merge_from_bytes(snapshot_data);
+                            parsed_data.mut_region().set_start_key(b"".to_vec());
+                            parsed_data.mut_region().set_end_key(b"".to_vec());
+                            msg2.mut_message().mut_snapshot().set_data(parsed_data.write_to_bytes().unwrap().into());
+                            msg.msg = msg2;
+                            info!("!!!!! after {:?}", msg.msg);
+                        }
+                    }
+
+                    info!("!!!!!! handle_msgs 33333");
                     if let Err(e) = self.on_raft_message(msg) {
                         error!(%e;
                             "handle raft message err";

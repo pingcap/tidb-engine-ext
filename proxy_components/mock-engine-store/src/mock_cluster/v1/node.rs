@@ -185,7 +185,7 @@ impl Transport for ChannelTransport {
 
 type SimulateChannelTransport<EK> = SimulateTransport<ChannelTransport, EK>;
 pub struct NodeCluster {
-    trans: ChannelTransport,
+    pub trans: ChannelTransport,
     pd_client: Arc<TestPdClient>,
     nodes: HashMap<u64, MultiRaftServer<TestPdClient, TiFlashEngine, ProxyRaftEngine>>,
     snap_mgrs: HashMap<u64, SnapManager>,

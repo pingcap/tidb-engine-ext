@@ -152,8 +152,7 @@ impl RaftGrpcMessageFilter for TiFlashGrpcMessageFilter {
         }
 
         let mut usage = 0;
-        let b = memory_usage_reaches_high_water(&mut usage);
-        b
+        memory_usage_reaches_high_water(&mut usage)
     }
 
     fn should_reject_snapshot(&self) -> bool {
@@ -164,8 +163,7 @@ impl RaftGrpcMessageFilter for TiFlashGrpcMessageFilter {
         }
 
         let mut usage = 0;
-        let b = memory_usage_reaches_high_water(&mut usage);
-        b
+        memory_usage_reaches_high_water(&mut usage)
     }
 }
 

@@ -4,9 +4,9 @@ on:
   # push:
   #   branches:
   #     - 'raftstore-proxy*'
-  pull_request:
-    branches:
-      - 'raftstore-proxy*'
+  # pull_request:
+  #   branches:
+  #     - 'raftstore-proxy*'
 
 jobs:
   build-check-old:

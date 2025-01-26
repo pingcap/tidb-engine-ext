@@ -33,17 +33,18 @@ pub fn overwrite_config_with_cmd_args(
     matches: &ArgMatches<'_>,
 ) {
     info!("arg matches is {:?}", matches);
+    // the logger service is not bootstrapped, so we rely on println
     println!("arg matches is {:?}", matches);
     if let Some(level) = matches.value_of("log-level") {
         config.log.level = logger::get_level_by_string(level).unwrap().into();
-        // For backward compating
+        // For backward compatibility
         #[allow(deprecated)]
         config.log_level = slog::Level::Info.into();
     }
 
     if let Some(file) = matches.value_of("log-file") {
         config.log.file.filename = file.to_owned();
-        // For backward compating
+        // For backward compatibility
         #[allow(deprecated)]
         config.log_file = "".to_owned();
     }

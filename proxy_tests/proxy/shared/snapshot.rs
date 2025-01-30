@@ -1,3 +1,5 @@
+use fail::fail_point;
+
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 use crate::utils::v1::*;
 
@@ -491,5 +493,59 @@ fn test_apply_cancelled_pre_handle() {
     );
 
     fail::remove("on_ob_cancel_after_pre_handle_snapshot");
+    cluster.shutdown();
+}
+
+#[test]
+fn test_apply_before_snapshot() {
+    fail::cfg("on_pre_write_apply_state", "return").unwrap();
+
+    tikv_util::set_panic_hook(true, "./");
+    let (mut cluster, pd_client) = new_mock_cluster_snap(0, 2);
+    assert_eq!(cluster.cfg.proxy_cfg.raft_store.snap_handle_pool_size, 2);
+
+    disable_auto_gen_compact_log(&mut cluster);
+
+    // Disable default max peer count check.
+    pd_client.disable_default_operator();
+
+    let r1 = cluster.run_conf_change();
+    let eng_ids = cluster
+        .engines
+        .iter()
+        .map(|e| e.0.to_owned())
+        .collect::<Vec<_>>();
+
+    cluster.must_put(b"k1", b"v");
+    cluster.must_put(b"k2", b"v");
+    cluster.must_put(b"k3", b"v");
+    cluster.must_put(b"k4", b"v");
+
+    check_key(&cluster, b"k4", b"v", Some(true), None, Some(vec![1]));
+
+    cluster.add_send_filter(CloneFilterFactory(
+        RegionPacketFilter::new(r1, 2)
+            .msg_type(MessageType::MsgAppend)
+            .direction(Direction::Both),
+    ));
+
+    pd_client.add_peer(cluster.get_region(b"k1").get_id(), new_learner_peer(eng_ids[1], 1112));
+
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+
+    cluster.must_split(&cluster.get_region(b"k1"), b"k2");
+    // k1 in 1000, k4 in 1
+    info!("k1 in {}, k4 in {}", cluster.get_region(b"k1").get_id(), cluster.get_region(b"k4").get_id());
+
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+
+    check_key(&cluster, b"k1", b"v", Some(true), None, Some(vec![1, 2]));
+    
+    fail::cfg("mock_overlapped_region_1", "return(1)");
+    cluster.clear_send_filters();
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+
+    check_key(&cluster, b"k4", b"v", Some(true), None, Some(vec![1, 2]));
+    
     cluster.shutdown();
 }

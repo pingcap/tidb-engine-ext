@@ -270,14 +270,6 @@ pub unsafe fn run_proxy(
                 .required(true)
                 .takes_value(true),
         )
-        /* 
-        .arg(
-            Arg::with_name("engine-role-label")
-                .long("engine-role-label")
-                .help("Set engine role label")
-                .takes_value(true),
-        )
-        */
         .arg(
             Arg::with_name("only-decryption")
                 .long("only-decryption")

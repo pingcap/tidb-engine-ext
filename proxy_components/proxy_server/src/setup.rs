@@ -120,7 +120,8 @@ pub fn overwrite_config_with_cmd_args(
             }
             labels.insert(key, value);
         }
-        config.server.labels = labels;
+        // append the labels to `config.server.labels`
+        config.server.labels.extend(labels);
     }
 
     if let Some(capacity_str) = matches.value_of("capacity") {
@@ -148,13 +149,13 @@ pub fn overwrite_config_with_cmd_args(
                 .unwrap(),
         ),
     );
-    const DEFAULT_ENGINE_ROLE_LABEL_KEY: &str = "engine_role";
-    if let Some(engine_role_value) = matches.value_of("engine-role-label") {
-        config.server.labels.insert(
-            DEFAULT_ENGINE_ROLE_LABEL_KEY.to_owned(),
-            String::from(engine_role_value),
-        );
-    }
+    // const DEFAULT_ENGINE_ROLE_LABEL_KEY: &str = "engine_role";
+    // if let Some(engine_role_value) = matches.value_of("engine-role-label") {
+    // config.server.labels.insert(
+    // DEFAULT_ENGINE_ROLE_LABEL_KEY.to_owned(),
+    // String::from(engine_role_value),
+    // );
+    // }
     if let Some(unips_enabled_str) = matches.value_of("unips-enabled") {
         let enabled: u64 = unips_enabled_str.parse().unwrap_or_else(|e| {
             fatal!("invalid unips-enabled: {}", e);

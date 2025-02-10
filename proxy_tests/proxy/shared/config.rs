@@ -242,7 +242,8 @@ fn test_config_proxy_engine_role_label() {
                 .required(true)
                 .takes_value(true),
         );
-    // case-1: If engine-role label not specified in arguments, it's none.
+    // case-1: If engine-role label specified in neither the argument `--labels` nor
+    // proxy's config file, it's none.
     let args = vec!["test_config_proxy_default1", "--engine-label", "tiflash"];
     let matches = app.clone().get_matches_from(args);
     overwrite_config_with_cmd_args(&mut config, &mut proxy_config, &matches);
@@ -259,8 +260,8 @@ fn test_config_proxy_engine_role_label() {
         true
     );
 
-    // case-2: If engine-role label specified in arguments, use it as engine-role
-    // label.
+    // case-2: If engine-role label specified in the argument `--label`, use it as
+    // engine-role label.
     let args = vec![
         "test_config_proxy_default1",
         "--engine-label",

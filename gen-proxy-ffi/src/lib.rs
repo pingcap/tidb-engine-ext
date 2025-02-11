@@ -6,6 +6,7 @@ use std::{
     path::Path,
 };
 
+use bindgen::CodegenConfig;
 use walkdir::WalkDir;
 
 type VersionType = u64;
@@ -129,7 +130,7 @@ pub fn gen_ffi_code() {
         .enable_cxx_namespaces()
         .disable_header_comment()
         .generate_inline_functions(true)
-        .use_core()
+        .with_codegen_config(CodegenConfig::all())
         .default_enum_style(bindgen::EnumVariation::Rust {
             non_exhaustive: false,
         });

@@ -128,7 +128,6 @@ pub fn gen_ffi_code() {
         .derive_copy(false)
         .enable_cxx_namespaces()
         .disable_header_comment()
-        .trust_clang_mangling(false)
         .default_enum_style(bindgen::EnumVariation::Rust {
             non_exhaustive: false,
         });

@@ -140,6 +140,7 @@ pub fn gen_ffi_code() {
     let bindings = builder.generate().unwrap();
 
     let buff = bindings.to_string();
+    println!("!!!! buff {}", buff);
     // let buff = filter_by_namespace(&buff);
     let ori_buff = read_file_to_string(&tar_file, "Couldn't open rust ffi code file");
     if ori_buff == buff {

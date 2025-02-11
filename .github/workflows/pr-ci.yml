@@ -36,7 +36,7 @@ jobs:
         run: |
           curl https://sh.rustup.rs -sSf | sh -s -- --no-modify-path --default-toolchain none -y
           export PATH=~/.cargo/bin/:$PATH
-          rustup self update && rustup set profile minimal && rustup default $(cat "rust-toolchain")
+          rustup self update && rustup set profile minimal && rustup default $(cat "rust-toolchain.toml")
           # cargo install sccache
       # - name: cache build target
       #   uses: actions/cache@v2
@@ -84,7 +84,7 @@ jobs:
         run: |
           curl https://sh.rustup.rs -sSf | sh -s -- --no-modify-path --default-toolchain none -y
           export PATH=~/.cargo/bin/:$PATH
-          rustup self update && rustup set profile minimal && rustup default $(cat "rust-toolchain")
+          rustup self update && rustup set profile minimal && rustup default $(cat "rust-toolchain.toml")
           # cargo install sccache
       # - name: cache build target
       #   uses: actions/cache@v2

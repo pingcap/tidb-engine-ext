@@ -63,17 +63,17 @@ jobs:
       - uses: actions/checkout@v2
         with:
           submodules: true
-      - name: cache cargo env
-        id: cache-cargo
-        uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/rust-toolchain') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      # - name: cache cargo env
+      #   id: cache-cargo
+      #   uses: actions/cache@v2
+      #   with:
+      #     path: |
+      #       ~/.cargo/bin/
+      #       ~/.cargo/registry/
+      #       ~/.cargo/git/
+      #     key: ${{ runner.os }}-cargo-${{ hashFiles('**/rust-toolchain') }}
+      #     restore-keys: |
+      #       ${{ runner.os }}-cargo-
       - name: Install dependencies (protocol buffers compiler)
         uses: arduino/setup-protoc@v1
         with:
@@ -85,7 +85,7 @@ jobs:
           curl https://sh.rustup.rs -sSf | sh -s -- --no-modify-path --default-toolchain none -y
           export PATH=~/.cargo/bin/:$PATH
           cat "rust-toolchain.toml"
-          rustup self update && rustup set profile minimal && rustup default $(cat nightly-2023-12-28)
+          rustup self update && rustup set profile minimal && rustup default nightly-2023-12-28
           # cargo install sccache
       # - name: cache build target
       #   uses: actions/cache@v2

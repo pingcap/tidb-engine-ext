@@ -394,14 +394,8 @@ struct EngineStoreServerHelper {
                                           ReportThreadAllocateInfoBatch data);
 };
 
-#ifdef __cplusplus
-extern "C" {
-#endif
 // Basically same as ffi_server_info, but no need to setup ProxyHelper, only
 // need to setup ServerHelper. Used when proxy not start.
 uint32_t ffi_get_server_info_from_proxy(intptr_t, BaseBuffView, RawVoidPtr);
-#ifdef __cplusplus
-}
-#endif
 
 }  // namespace DB

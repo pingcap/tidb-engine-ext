@@ -128,7 +128,6 @@ pub fn gen_ffi_code() {
         .derive_copy(false)
         .enable_cxx_namespaces()
         .disable_header_comment()
-        .rustfmt_bindings(false)
         .default_enum_style(bindgen::EnumVariation::Rust {
             non_exhaustive: false,
         });
@@ -140,8 +139,7 @@ pub fn gen_ffi_code() {
     let bindings = builder.generate().unwrap();
 
     let buff = bindings.to_string();
-    println!("!!!! buff {} {:?} {}", buff.len(), buff.find("ffi_get_server_info_from_proxy"), buff.chars().rev().take(500).collect::<String>().chars().rev().collect::<String>());
-    // let buff = filter_by_namespace(&buff);
+    let buff = filter_by_namespace(&buff);
     let ori_buff = read_file_to_string(&tar_file, "Couldn't open rust ffi code file");
     if ori_buff == buff {
         println!("There is no need to overwrite rust ffi code file");

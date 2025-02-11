@@ -7,6 +7,7 @@ echo "PATH=", $PATH
 if [[ $M == "fmt" ]]; then
     pwd
     rustup toolchain list
+    rustup show
     git rev-parse --show-toplevel
     make gen_proxy_ffi
     git diff

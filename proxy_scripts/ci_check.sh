@@ -10,6 +10,7 @@ if [[ $M == "fmt" ]]; then
     rustup toolchain list
     rustup show
     git rev-parse --show-toplevel
+    cargo --version -v
     make gen_proxy_ffi
     git diff
     git status -s .

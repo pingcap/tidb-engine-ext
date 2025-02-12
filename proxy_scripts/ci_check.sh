@@ -2,7 +2,7 @@ set -uxeo pipefail
 if [[ $M == "fmt" ]]; then
     pwd
     git rev-parse --show-toplevel
-    make gen_proxy_ffi_fast
+    make gen_proxy_ffi
     git status -s .
     GIT_STATUS=$(git status -s .) && if [[ ${GIT_STATUS} ]]; then echo "Error: found illegal git status"; echo ${GIT_STATUS}; [[ -z ${GIT_STATUS} ]]; fi
     cargo fmt -- --check

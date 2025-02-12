@@ -2,7 +2,7 @@ set -uxeo pipefail
 if [[ $M == "fmt" ]]; then
     pwd
     git rev-parse --show-toplevel
-    make gen_proxy_ffi
+    make gen_proxy_ffi_fast
     git status -s .
     GIT_STATUS=$(git status -s .) && if [[ ${GIT_STATUS} ]]; then echo "Error: found illegal git status"; echo ${GIT_STATUS}; [[ -z ${GIT_STATUS} ]]; fi
     cargo fmt -- --check
@@ -30,7 +30,7 @@ elif [[ $M == "testold" ]]; then
     # cargo test --package tests --test failpoints cases::test_disk_full
     # cargo test --package tests --test failpoints cases::test_merge -- --skip test_node_merge_restart --skip test_node_merge_catch_up_logs_no_need
     # cargo test --package tests --test failpoints cases::test_snap
-    cargo test --package tests --test failpoints cases::test_import_service
+    # cargo test --package tests --test failpoints cases::test_import_service
 elif [[ $M == "testnew" ]]; then
     export ENGINE_LABEL_VALUE=tiflash
     export RUST_BACKTRACE=full

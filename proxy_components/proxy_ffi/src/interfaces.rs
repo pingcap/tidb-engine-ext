@@ -789,7 +789,7 @@ pub mod root {
                 arg3: root::DB::RawVoidPtr,
             ) -> u32;
         }
-        pub const RAFT_STORE_PROXY_VERSION: u64 = 5778071554269461398;
+        pub const RAFT_STORE_PROXY_VERSION: u64 = 9679186549381427051;
         pub const RAFT_STORE_PROXY_MAGIC_NUMBER: u32 = 324508639;
     }
 }

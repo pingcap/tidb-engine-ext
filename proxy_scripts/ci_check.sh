@@ -6,6 +6,7 @@ echo "PATH=", $PATH
 
 if [[ $M == "fmt" ]]; then
     pwd
+    clang --version
     rustup toolchain list
     rustup show
     git rev-parse --show-toplevel

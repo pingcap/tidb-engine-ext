@@ -211,7 +211,7 @@ unset-override:
 
 pre-format: unset-override
 	@rustup component add rustfmt
-	@cargo install --force -q cargo-sort
+	@cargo install --locked --force -q cargo-sort
 
 ci_fmt_check:
 	M="fmt" ./proxy_scripts/ci_check.sh

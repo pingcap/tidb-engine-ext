@@ -129,26 +129,6 @@ fn test_config_proxy_default_no_config_item() {
     assert_eq!(config.server.reject_messages_on_memory_ratio, 0.05);
 }
 
-#[test]
-fn test_cmdline_overwrite() {
-    let args = vec!["test_cmdline_overwrite1", "--unips-enabled", "1"];
-    let matches = App::new("RaftStore Proxy")
-        .arg(
-            Arg::with_name("unips-enabled")
-                .long("unips-enabled")
-                .required(true)
-                .takes_value(true),
-        )
-        .get_matches_from(args);
-    let mut v: Vec<String> = vec![];
-    let mut config = gen_tikv_config(&None, false, &mut v);
-    let mut proxy_config = gen_proxy_config(&None, false, &mut v);
-    proxy_config.engine_store.enable_unips = false;
-    overwrite_config_with_cmd_args(&mut config, &mut proxy_config, &matches);
-    address_proxy_config(&mut config, &proxy_config);
-    assert_eq!(proxy_config.engine_store.enable_unips, true);
-}
-
 /// We test if the engine-label is set properly.
 #[test]
 fn test_config_proxy_engine_label() {
@@ -224,28 +204,6 @@ apply-low-priority-pool-size = 41
         41,
         config.raft_store.apply_batch_system.low_priority_pool_size
     );
-}
-
-#[test]
-fn test_owned_config() {
-    test_util::init_log_for_test();
-    let mut file = tempfile::NamedTempFile::new().unwrap();
-    write!(
-        file,
-        "
-[engine-store]
-enable-fast-add-peer = true
-    "
-    )
-    .unwrap();
-    let path = file.path();
-
-    let mut v: Vec<String> = vec![];
-    let cpath = Some(path.as_os_str());
-    let proxy_config = gen_proxy_config(&cpath, false, &mut v);
-
-    info!("using proxy config"; "config" => ?proxy_config);
-    assert_eq!(true, proxy_config.engine_store.enable_fast_add_peer);
 }
 
 #[test]

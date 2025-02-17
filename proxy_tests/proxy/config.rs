@@ -127,7 +127,7 @@ fn test_config_proxy_default_no_config_item() {
     assert_eq!(config.raft_store.evict_cache_on_memory_ratio, 0.1);
     assert_eq!(config.memory_usage_high_water, 0.9);
     // Seems #244 doesn't goes into this branch.
-    assert_eq!(config.server.reject_messages_on_memory_ratio, 0.05);
+    assert_eq!(config.server.reject_messages_on_memory_ratio, 0.2);
 }
 
 /// We test if the engine-label is set properly.

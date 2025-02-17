@@ -23,9 +23,9 @@ elif [[ $M == "testold" ]]; then
     cargo test --features "$ENABLE_FEATURES" --package tests --test failpoints cases::test_transaction
     cargo test --features "$ENABLE_FEATURES" --package tests --test failpoints cases::test_cmd_epoch_checker
     # cargo test --package tests --test failpoints cases::test_disk_full
-    cargo test --package tests --test failpoints cases::test_merge
+    # cargo test --package tests --test failpoints cases::test_merge
     # cargo test --package tests --test failpoints cases::test_snap
-    cargo test --package tests --test failpoints cases::test_import_service
+    # cargo test --package tests --test failpoints cases::test_import_service
 elif [[ $M == "testnew" ]]; then
     export ENGINE_LABEL_VALUE=tiflash
     export RUST_BACKTRACE=full

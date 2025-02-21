@@ -19,7 +19,13 @@ use kvproto::{
 };
 pub use node::NodeV2;
 pub use raft_extension::Extension;
-use raftstore::store::{util::encode_start_ts_into_flag_data, RegionSnapshot};
+use raftstore::{
+    store::{
+        cmd_resp, msg::ErrorCallback, util::encode_start_ts_into_flag_data, RaftCmdExtraOpts,
+        RegionSnapshot,
+    },
+    Error,
+};
 use raftstore_v2::{
     router::{
         message::SimpleWrite, CmdResChannelBuilder, CmdResEvent, CmdResStream, PeerMsg, RaftRouter,
@@ -28,6 +34,7 @@ use raftstore_v2::{
 };
 use tikv_kv::{Modify, WriteEvent};
 use tikv_util::time::Instant;
+use tracker::{get_tls_tracker_token, GLOBAL_TRACKERS};
 use txn_types::{TxnExtra, TxnExtraScheduler, WriteBatchFlags};
 
 use super::{
@@ -172,7 +179,7 @@ impl<EK: KvEngine, ER: RaftEngine> tikv_kv::Engine for RaftKv2<EK, ER> {
                 .set_key_ranges(mem::take(&mut ctx.key_ranges).into());
         }
         ASYNC_REQUESTS_COUNTER_VEC.snapshot.all.inc();
-        let begin_instant = Instant::now_coarse();
+        let begin_instant = Instant::now();
 
         let mut header = new_request_header(ctx.pb_ctx);
         let mut flags = 0;
@@ -200,9 +207,36 @@ impl<EK: KvEngine, ER: RaftEngine> tikv_kv::Engine for RaftKv2<EK, ER> {
             let res = f.await;
             match res {
                 Ok(snap) => {
-                    ASYNC_REQUESTS_DURATIONS_VEC
-                        .snapshot
-                        .observe(begin_instant.saturating_elapsed_secs());
+                    let elapse = begin_instant.saturating_elapsed_secs();
+                    let tracker = get_tls_tracker_token();
+                    GLOBAL_TRACKERS.with_tracker(tracker, |tracker| {
+                        if tracker.metrics.read_index_propose_wait_nanos > 0 {
+                            ASYNC_REQUESTS_DURATIONS_VEC
+                                .snapshot_read_index_propose_wait
+                                .observe(
+                                    tracker.metrics.read_index_propose_wait_nanos as f64
+                                        / 1_000_000_000.0,
+                                );
+                            // snapshot may be handled by lease read in raftstore
+                            if tracker.metrics.read_index_confirm_wait_nanos > 0 {
+                                ASYNC_REQUESTS_DURATIONS_VEC
+                                    .snapshot_read_index_confirm
+                                    .observe(
+                                        tracker.metrics.read_index_confirm_wait_nanos as f64
+                                            / 1_000_000_000.0,
+                                    );
+                            }
+                        } else if tracker.metrics.local_read {
+                            ASYNC_REQUESTS_DURATIONS_VEC
+                                .snapshot_local_read
+                                .observe(elapse);
+                        }
+                    });
+                    // The observed snapshot duration is larger than the actual
+                    // snapshot duration, because it includes the waiting time
+                    // of this future.
+                    // TODO: Fix the inaccuracy, see #17581.
+                    ASYNC_REQUESTS_DURATIONS_VEC.snapshot.observe(elapse);
                     ASYNC_REQUESTS_COUNTER_VEC.snapshot.success.inc();
                     Ok(snap)
                 }
@@ -241,6 +275,17 @@ impl<EK: KvEngine, ER: RaftEngine> tikv_kv::Engine for RaftKv2<EK, ER> {
 
         let region_id = ctx.region_id;
         ASYNC_REQUESTS_COUNTER_VEC.write.all.inc();
+
+        let inject_region_not_found = (|| {
+            // If rid is some, only the specified region reports error.
+            // If rid is None, all regions report error.
+            fail_point!("raftkv_early_error_report", |rid| -> bool {
+                rid.and_then(|rid| rid.parse().ok())
+                    .map_or(true, |rid: u64| rid == region_id)
+            });
+            false
+        })();
+
         let begin_instant = Instant::now_coarse();
         let mut header = Box::new(new_request_header(ctx));
         let mut flags = 0;
@@ -264,45 +309,48 @@ impl<EK: KvEngine, ER: RaftEngine> tikv_kv::Engine for RaftKv2<EK, ER> {
         if WriteEvent::subscribed_committed(subscribed) {
             builder.subscribe_committed();
         }
-        if let Some(cb) = on_applied {
-            builder.before_set(move |resp| {
-                let mut res = if !resp.get_header().has_error() {
-                    Ok(())
-                } else {
-                    Err(tikv_kv::Error::from(resp.get_header().get_error().clone()))
-                };
+        builder.before_set(move |resp| {
+            let mut res = if !resp.get_header().has_error() {
+                ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
+                ASYNC_REQUESTS_DURATIONS_VEC
+                    .write
+                    .observe(begin_instant.saturating_elapsed_secs());
+                Ok(())
+            } else {
+                Err(tikv_kv::Error::from(resp.get_header().get_error().clone()))
+            };
+            if let Some(cb) = on_applied {
                 cb(&mut res);
-            });
-        }
-        let (ch, sub) = builder.build();
-        let msg = PeerMsg::SimpleWrite(SimpleWrite {
-            header,
-            data,
-            ch,
-            send_time: Instant::now_coarse(),
+            }
         });
-        let res = self
-            .router
-            .store_router()
-            .check_send(region_id, msg)
-            .map_err(tikv_kv::Error::from);
+        let (ch, sub) = builder.build();
+        let res = if inject_region_not_found {
+            ch.report_error(cmd_resp::new_error(Error::RegionNotFound(region_id)));
+            Err(tikv_kv::Error::from(Error::RegionNotFound(region_id)))
+        } else {
+            let msg = PeerMsg::SimpleWrite(SimpleWrite {
+                header,
+                data,
+                ch,
+                send_time: Instant::now_coarse(),
+                extra_opts: RaftCmdExtraOpts {
+                    deadline: batch.deadline,
+                    disk_full_opt: batch.disk_full_opt,
+                },
+            });
+            self.router
+                .store_router()
+                .check_send(region_id, msg)
+                .map_err(tikv_kv::Error::from)
+        };
         (Transform {
             resp: CmdResStream::new(sub),
             early_err: res.err(),
         })
         .inspect(move |ev| {
-            let WriteEvent::Finished(res) = ev else { return };
-            match res {
-                Ok(()) => {
-                    ASYNC_REQUESTS_COUNTER_VEC.write.success.inc();
-                    ASYNC_REQUESTS_DURATIONS_VEC
-                        .write
-                        .observe(begin_instant.saturating_elapsed_secs());
-                }
-                Err(e) => {
-                    let status_kind = get_status_kind_from_engine_error(e);
-                    ASYNC_REQUESTS_COUNTER_VEC.write.get(status_kind).inc();
-                }
+            if let WriteEvent::Finished(Err(e)) = ev {
+                let status_kind = get_status_kind_from_engine_error(e);
+                ASYNC_REQUESTS_COUNTER_VEC.write.get(status_kind).inc();
             }
         })
     }

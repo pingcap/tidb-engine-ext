@@ -4,7 +4,7 @@ use std::{
     mem,
     string::String,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -28,9 +28,13 @@ use raftstore::{
     store::util::compare_region_epoch,
     Error as RaftStoreError,
 };
-use resolved_ts::Resolver;
+use resolved_ts::{Resolver, TsSource, ON_DROP_WARN_HEAP_SIZE};
 use tikv::storage::{txn::TxnEntry, Statistics};
-use tikv_util::{debug, info, warn};
+use tikv_util::{
+    debug, info,
+    memory::{HeapSize, MemoryQuota},
+    warn,
+};
 use txn_types::{Key, Lock, LockType, TimeStamp, WriteBatchFlags, WriteRef, WriteType};
 
 use crate::{
@@ -132,6 +136,10 @@ pub struct Downstream {
     kv_api: ChangeDataRequestKvApi,
     filter_loop: bool,
     pub(crate) observed_range: ObservedRange,
+
+    // When meet region errors like split or merge, we can cancel incremental scan draining
+    // by `scan_truncated`.
+    pub(crate) scan_truncated: Arc<AtomicBool>,
 }
 
 impl Downstream {
@@ -159,10 +167,14 @@ impl Downstream {
             kv_api,
             filter_loop,
             observed_range,
+
+            scan_truncated: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    /// Sink events to the downstream.
+    // NOTE: it's not allowed to sink `EventError` directly by this function,
+    // because the sink can be also used by an incremental scan. We must ensure
+    // no more events can be pushed to the sink after an `EventError` is sent.
     pub fn sink_event(&self, mut event: Event, force: bool) -> Result<()> {
         event.set_request_id(self.req_id);
         if self.sink.is_none() {
@@ -187,19 +199,20 @@ impl Downstream {
         }
     }
 
+    /// EventErrors must be sent by this function. And we must ensure no more
+    /// events or ResolvedTs will be sent to the downstream after
+    /// `sink_error_event` is called.
     pub fn sink_error_event(&self, region_id: u64, err_event: EventError) -> Result<()> {
+        info!("cdc downstream meets region error";
+            "conn_id" => ?self.conn_id, "downstream_id" => ?self.id, "req_id" => self.req_id);
+
+        self.scan_truncated.store(true, Ordering::Release);
         let mut change_data_event = Event::default();
         change_data_event.event = Some(Event_oneof_event::Error(err_event));
         change_data_event.region_id = region_id;
         // Try it's best to send error events.
         let force_send = true;
         self.sink_event(change_data_event, force_send)
-    }
-
-    pub fn sink_region_not_found(&self, region_id: u64) -> Result<()> {
-        let mut err_event = EventError::default();
-        err_event.mut_region_not_found().region_id = region_id;
-        self.sink_error_event(region_id, err_event)
     }
 
     pub fn set_sink(&mut self, sink: Sink) {
@@ -226,22 +239,89 @@ impl Downstream {
     }
 }
 
-#[derive(Default)]
 struct Pending {
-    pub downstreams: Vec<Downstream>,
-    pub locks: Vec<PendingLock>,
-    pub pending_bytes: usize,
+    downstreams: Vec<Downstream>,
+    locks: Vec<PendingLock>,
+    pending_bytes: usize,
+    memory_quota: Arc<MemoryQuota>,
+}
+
+impl Pending {
+    fn new(memory_quota: Arc<MemoryQuota>) -> Pending {
+        Pending {
+            downstreams: vec![],
+            locks: vec![],
+            pending_bytes: 0,
+            memory_quota,
+        }
+    }
+
+    fn push_pending_lock(&mut self, lock: PendingLock) -> Result<()> {
+        let bytes = lock.approximate_heap_size();
+        self.memory_quota.alloc(bytes)?;
+        self.locks.push(lock);
+        self.pending_bytes += bytes;
+        CDC_PENDING_BYTES_GAUGE.add(bytes as i64);
+        Ok(())
+    }
+
+    fn on_region_ready(&mut self, resolver: &mut Resolver) -> Result<()> {
+        fail::fail_point!("cdc_pending_on_region_ready", |_| Err(
+            Error::MemoryQuotaExceeded(tikv_util::memory::MemoryQuotaExceeded)
+        ));
+        // Must take locks, otherwise it may double free memory quota on drop.
+        for lock in mem::take(&mut self.locks) {
+            self.memory_quota.free(lock.approximate_heap_size());
+            match lock {
+                PendingLock::Track { key, start_ts } => {
+                    resolver.track_lock(start_ts, key, None)?;
+                }
+                PendingLock::Untrack { key } => resolver.untrack_lock(&key, None),
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Pending {
     fn drop(&mut self) {
         CDC_PENDING_BYTES_GAUGE.sub(self.pending_bytes as i64);
+        let locks = mem::take(&mut self.locks);
+        if locks.is_empty() {
+            return;
+        }
+
+        // Free memory quota used by pending locks and unlocks.
+        let mut bytes = 0;
+        let num_locks = locks.len();
+        for lock in locks {
+            bytes += lock.approximate_heap_size();
+        }
+        if bytes > ON_DROP_WARN_HEAP_SIZE {
+            warn!("cdc drop huge Pending";
+                "bytes" => bytes,
+                "num_locks" => num_locks,
+                "memory_quota_in_use" => self.memory_quota.in_use(),
+                "memory_quota_capacity" => self.memory_quota.capacity(),
+            );
+        }
+        self.memory_quota.free(bytes);
     }
 }
 
 enum PendingLock {
     Track { key: Vec<u8>, start_ts: TimeStamp },
     Untrack { key: Vec<u8> },
+}
+
+impl HeapSize for PendingLock {
+    fn approximate_heap_size(&self) -> usize {
+        match self {
+            PendingLock::Track { key, .. } | PendingLock::Untrack { key } => {
+                key.approximate_heap_size()
+            }
+        }
+    }
 }
 
 /// A CDC delegate of a raftstore region peer.
@@ -265,14 +345,18 @@ pub struct Delegate {
 
 impl Delegate {
     /// Create a Delegate the given region.
-    pub fn new(region_id: u64, txn_extra_op: Arc<AtomicCell<TxnExtraOp>>) -> Delegate {
+    pub fn new(
+        region_id: u64,
+        txn_extra_op: Arc<AtomicCell<TxnExtraOp>>,
+        memory_quota: Arc<MemoryQuota>,
+    ) -> Delegate {
         Delegate {
             region_id,
             handle: ObserveHandle::new(),
             resolver: None,
             region: None,
             resolved_downstreams: Vec::new(),
-            pending: Some(Pending::default()),
+            pending: Some(Pending::new(memory_quota)),
             txn_extra_op,
             failed: false,
         }
@@ -350,8 +434,13 @@ impl Delegate {
             downstream.state.store(DownstreamState::Stopped);
             let error_event = error.clone();
             if let Err(err) = downstream.sink_error_event(region_id, error_event) {
-                warn!("cdc broadcast error failed";
+                warn!("cdc send region error failed";
                     "region_id" => region_id, "error" => ?err, "origin_error" => ?error,
+                    "downstream_id" => ?downstream.id, "downstream" => ?downstream.peer,
+                    "request_id" => downstream.req_id, "conn_id" => ?downstream.conn_id);
+            } else {
+                info!("cdc send region error success";
+                    "region_id" => region_id, "origin_error" => ?error,
                     "downstream_id" => ?downstream.id, "downstream" => ?downstream.peer,
                     "request_id" => downstream.req_id, "conn_id" => ?downstream.conn_id);
             }
@@ -373,9 +462,9 @@ impl Delegate {
         self.txn_extra_op.as_ref()
     }
 
-    fn broadcast<F>(&self, send: F) -> Result<()>
+    fn broadcast<F>(&self, mut send: F) -> Result<()>
     where
-        F: Fn(&Downstream) -> Result<()>,
+        F: FnMut(&Downstream) -> Result<()>,
     {
         let downstreams = self.downstreams();
         assert!(
@@ -395,7 +484,7 @@ impl Delegate {
         &mut self,
         mut resolver: Resolver,
         region: Region,
-    ) -> Vec<(&Downstream, Error)> {
+    ) -> Result<Vec<(&Downstream, Error)>> {
         assert!(
             self.resolver.is_none(),
             "region {} resolver should not be ready",
@@ -408,26 +497,24 @@ impl Delegate {
         }
 
         // Mark the delegate as initialized.
-        let mut pending = self.pending.take().unwrap();
-        self.region = Some(region);
         info!("cdc region is ready"; "region_id" => self.region_id);
-
-        for lock in mem::take(&mut pending.locks) {
-            match lock {
-                PendingLock::Track { key, start_ts } => resolver.track_lock(start_ts, key, None),
-                PendingLock::Untrack { key } => resolver.untrack_lock(&key, None),
-            }
-        }
-        self.resolver = Some(resolver);
-
+        // Downstreams in pending must be moved to resolved_downstreams
+        // immediately and must not return in the middle, otherwise the delegate
+        // loses downstreams.
+        let mut pending = self.pending.take().unwrap();
         self.resolved_downstreams = mem::take(&mut pending.downstreams);
+
+        pending.on_region_ready(&mut resolver)?;
+        self.resolver = Some(resolver);
+        self.region = Some(region);
+
         let mut failed_downstreams = Vec::new();
         for downstream in self.downstreams() {
             if let Err(e) = self.check_epoch_on_ready(downstream) {
                 failed_downstreams.push((downstream, e));
             }
         }
-        failed_downstreams
+        Ok(failed_downstreams)
     }
 
     /// Try advance and broadcast resolved ts.
@@ -439,7 +526,7 @@ impl Delegate {
         }
         debug!("cdc try to advance ts"; "region_id" => self.region_id, "min_ts" => min_ts);
         let resolver = self.resolver.as_mut().unwrap();
-        let resolved_ts = resolver.resolve(min_ts, None);
+        let resolved_ts = resolver.resolve(min_ts, None, TsSource::Cdc);
         debug!("cdc resolved ts updated";
             "region_id" => self.region_id, "resolved_ts" => resolved_ts);
         Some(resolved_ts)
@@ -491,7 +578,6 @@ impl Delegate {
         request_id: u64,
         entries: Vec<Option<KvEntry>>,
         filter_loop: bool,
-        observed_range: &ObservedRange,
     ) -> Result<Vec<CdcEvent>> {
         let entries_len = entries.len();
         let mut rows = vec![Vec::with_capacity(entries_len)];
@@ -509,25 +595,19 @@ impl Delegate {
                     lock,
                     old_value,
                 })) => {
-                    if !observed_range.contains_encoded_key(&lock.0) {
-                        continue;
-                    }
                     let l = Lock::parse(&lock.1).unwrap();
                     if decode_lock(lock.0, l, &mut row, &mut _has_value) {
                         continue;
                     }
                     decode_default(default.1, &mut row, &mut _has_value);
                     row.old_value = old_value.finalized().unwrap_or_default();
-                    row_size = row.key.len() + row.value.len();
+                    row_size = row.key.len() + row.value.len() + row.old_value.len();
                 }
                 Some(KvEntry::TxnEntry(TxnEntry::Commit {
                     default,
                     write,
                     old_value,
                 })) => {
-                    if !observed_range.contains_encoded_key(&write.0) {
-                        continue;
-                    }
                     if decode_write(write.0, &write.1, &mut row, &mut _has_value, false) {
                         continue;
                     }
@@ -546,7 +626,7 @@ impl Delegate {
                     }
                     set_event_row_type(&mut row, EventLogType::Committed);
                     row.old_value = old_value.finalized().unwrap_or_default();
-                    row_size = row.key.len() + row.value.len();
+                    row_size = row.key.len() + row.value.len() + row.old_value.len();
                 }
                 None => {
                     // This type means scan has finished.
@@ -597,26 +677,21 @@ impl Delegate {
         is_one_pc: bool,
     ) -> Result<()> {
         debug_assert_eq!(self.txn_extra_op.load(), TxnExtraOp::ReadOldValue);
-        let mut read_old_value = |row: &mut EventRow, read_old_ts| -> Result<()> {
+        let read_old_value = |row: &mut EventRow, read_old_ts| -> Result<()> {
             let key = Key::from_raw(&row.key).append_ts(row.start_ts.into());
             let old_value = old_value_cb(key, read_old_ts, old_value_cache, statistics)?;
             row.old_value = old_value.unwrap_or_default();
             Ok(())
         };
 
-        // map[key] -> (event, has_value).
-        let mut txn_rows: HashMap<Vec<u8>, (EventRow, bool)> = HashMap::default();
+        // map[key] -> (event, has_value, old_value_ts).
+        let mut txn_rows: HashMap<Vec<u8>, (EventRow, bool, Option<TimeStamp>)> =
+            HashMap::default();
         let mut raw_rows: Vec<EventRow> = Vec::new();
         for mut req in requests {
-            match req.get_cmd_type() {
+            let res = match req.get_cmd_type() {
                 CmdType::Put => {
-                    self.sink_put(
-                        req.take_put(),
-                        is_one_pc,
-                        &mut txn_rows,
-                        &mut raw_rows,
-                        &mut read_old_value,
-                    )?;
+                    self.sink_put(req.take_put(), is_one_pc, &mut txn_rows, &mut raw_rows)
                 }
                 CmdType::Delete => self.sink_delete(req.take_delete()),
                 _ => {
@@ -625,31 +700,94 @@ impl Delegate {
                         "region_id" => self.region_id,
                         "command" => ?req,
                     );
+                    Ok(())
                 }
+            };
+            if res.is_err() {
+                self.mark_failed();
+                return res;
             }
         }
 
-        let mut rows = Vec::with_capacity(txn_rows.len());
-        for (_, (v, has_value)) in txn_rows {
-            if v.r_type == EventLogType::Prewrite && v.op_type == EventRowOpType::Put && !has_value
-            {
-                // It's possible that a prewrite command only contains lock but without
-                // default. It's not documented by classic Percolator but introduced with
-                // Large-Transaction. Those prewrites are not complete, we must skip them.
-                continue;
-            }
-            rows.push(v);
-        }
-        self.sink_downstream(rows, index, ChangeDataRequestKvApi::TiDb)?;
-        self.sink_downstream(raw_rows, index, ChangeDataRequestKvApi::RawKv)
+        self.sink_downstream_tidb(txn_rows.into_values(), read_old_value)?;
+        self.sink_downstream_raw(raw_rows, index)?;
+        Ok(())
     }
 
-    fn sink_downstream(
+    fn sink_downstream_tidb(
         &mut self,
-        entries: Vec<EventRow>,
-        index: u64,
-        kv_api: ChangeDataRequestKvApi,
+        entries: impl Iterator<Item = (EventRow, bool, Option<TimeStamp>)>,
+        mut read_old_value: impl FnMut(&mut EventRow, TimeStamp) -> Result<()>,
     ) -> Result<()> {
+        let mut entries = entries
+            .filter(|x| !TxnSource::is_lossy_ddl_reorg_source_set(x.0.txn_source))
+            // It's possible that a prewrite command only contains lock but without
+            // default. It's not documented by classic Percolator but introduced with
+            // Large-Transaction. Those prewrites are not complete, we must skip them.
+            .filter(|x| !(x.0.r_type == EventLogType::Prewrite && x.0.op_type == EventRowOpType::Put && !x.1))
+            .map(|x| (x.0, x.2))
+            .collect::<Vec<_>>();
+
+        let downstreams = self.downstreams();
+        assert!(
+            !downstreams.is_empty(),
+            "region {} miss downstream",
+            self.region_id
+        );
+
+        let region_id = self.region_id;
+        let send = move |downstream: &Downstream| {
+            // No ready downstream or a downstream that does not match the kv_api type, will
+            // be ignored. There will be one region that contains both Txn & Raw entries.
+            // The judgement here is for sending entries to downstreams with correct kv_api.
+            if !downstream.state.load().ready_for_change_events()
+                || downstream.kv_api != ChangeDataRequestKvApi::TiDb
+            {
+                return Ok(());
+            }
+
+            let mut d_entries = Vec::with_capacity(entries.len());
+            for (r, old_value_ts) in &mut entries {
+                if !downstream.observed_range.contains_raw_key(&r.key)
+                    || downstream.filter_loop && TxnSource::is_cdc_write_source_set(r.txn_source)
+                {
+                    continue;
+                }
+                if let Some(ts) = old_value_ts {
+                    read_old_value(r, *ts)?;
+                    *old_value_ts = None;
+                }
+                d_entries.push(r.clone());
+            }
+
+            if d_entries.is_empty() {
+                return Ok(());
+            }
+
+            let event = Event {
+                region_id,
+                request_id: downstream.get_req_id(),
+                event: Some(Event_oneof_event::Entries(EventEntries {
+                    entries: d_entries.into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+
+            // Do not force send for real time change data events.
+            let force_send = false;
+            downstream.sink_event(event, force_send)
+        };
+        match self.broadcast(send) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.mark_failed();
+                Err(e)
+            }
+        }
+    }
+
+    fn sink_downstream_raw(&mut self, entries: Vec<EventRow>, index: u64) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -692,7 +830,9 @@ impl Delegate {
             // No ready downstream or a downstream that does not match the kv_api type, will
             // be ignored. There will be one region that contains both Txn & Raw entries.
             // The judgement here is for sending entries to downstreams with correct kv_api.
-            if !downstream.state.load().ready_for_change_events() || downstream.kv_api != kv_api {
+            if !downstream.state.load().ready_for_change_events()
+                || downstream.kv_api != ChangeDataRequestKvApi::RawKv
+            {
                 return Ok(());
             }
             if downstream.filter_loop && filtered_entries.is_none() {
@@ -739,15 +879,14 @@ impl Delegate {
         &mut self,
         put: PutRequest,
         is_one_pc: bool,
-        txn_rows: &mut HashMap<Vec<u8>, (EventRow, bool)>,
+        txn_rows: &mut HashMap<Vec<u8>, (EventRow, bool, Option<TimeStamp>)>,
         raw_rows: &mut Vec<EventRow>,
-        read_old_value: impl FnMut(&mut EventRow, TimeStamp) -> Result<()>,
     ) -> Result<()> {
         let key_mode = ApiV2::parse_key_mode(put.get_key());
         if key_mode == KeyMode::Raw {
             self.sink_raw_put(put, raw_rows)
         } else {
-            self.sink_txn_put(put, is_one_pc, txn_rows, read_old_value)
+            self.sink_txn_put(put, is_one_pc, txn_rows)
         }
     }
 
@@ -762,21 +901,19 @@ impl Delegate {
         &mut self,
         mut put: PutRequest,
         is_one_pc: bool,
-        rows: &mut HashMap<Vec<u8>, (EventRow, bool)>,
-        mut read_old_value: impl FnMut(&mut EventRow, TimeStamp) -> Result<()>,
+        rows: &mut HashMap<Vec<u8>, (EventRow, bool, Option<TimeStamp>)>,
     ) -> Result<()> {
         match put.cf.as_str() {
             "write" => {
-                let (mut row, mut has_value) = (EventRow::default(), false);
+                let (mut row, mut has_value, mut old_value_ts) = (EventRow::default(), false, None);
                 if decode_write(put.take_key(), &put.value, &mut row, &mut has_value, true) {
                     return Ok(());
                 }
 
                 let commit_ts = if is_one_pc {
                     set_event_row_type(&mut row, EventLogType::Committed);
-                    let commit_ts = TimeStamp::from(row.commit_ts);
-                    read_old_value(&mut row, commit_ts.prev())?;
-                    Some(commit_ts)
+                    old_value_ts = Some(TimeStamp::from(row.commit_ts));
+                    Some(TimeStamp::from(row.commit_ts))
                 } else {
                     // 2PC
                     if row.commit_ts == 0 {
@@ -802,9 +939,12 @@ impl Delegate {
                         let o = o.into_mut();
                         mem::swap(&mut o.0.value, &mut row.value);
                         o.0 = row;
+                        if old_value_ts.is_some() {
+                            o.2 = old_value_ts;
+                        }
                     }
                     HashMapEntry::Vacant(v) => {
-                        v.insert((row, has_value));
+                        v.insert((row, has_value, old_value_ts));
                     }
                 }
             }
@@ -816,23 +956,20 @@ impl Delegate {
                     return Ok(());
                 }
 
-                let read_old_ts = std::cmp::max(for_update_ts, row.start_ts.into());
-                read_old_value(&mut row, read_old_ts)?;
+                let old_value_ts = Some(std::cmp::max(for_update_ts, row.start_ts.into()));
 
                 // In order to compute resolved ts, we must track inflight txns.
                 match self.resolver {
                     Some(ref mut resolver) => {
-                        resolver.track_lock(row.start_ts.into(), row.key.clone(), None)
+                        resolver.track_lock(row.start_ts.into(), row.key.clone(), None)?;
                     }
                     None => {
                         assert!(self.pending.is_some(), "region resolver not ready");
                         let pending = self.pending.as_mut().unwrap();
-                        pending.locks.push(PendingLock::Track {
+                        pending.push_pending_lock(PendingLock::Track {
                             key: row.key.clone(),
                             start_ts: row.start_ts.into(),
-                        });
-                        pending.pending_bytes += row.key.len();
-                        CDC_PENDING_BYTES_GAUGE.add(row.key.len() as i64);
+                        })?;
                     }
                 }
 
@@ -841,8 +978,9 @@ impl Delegate {
                     assert!(!has_value);
                     has_value = true;
                     mem::swap(&mut occupied.0.value, &mut row.value);
+                    occupied.2 = old_value_ts;
                 }
-                *occupied = (row, has_value);
+                *occupied = (row, has_value, old_value_ts);
             }
             "" | "default" => {
                 let key = Key::from_encoded(put.take_key()).truncate_ts().unwrap();
@@ -854,7 +992,7 @@ impl Delegate {
         Ok(())
     }
 
-    fn sink_delete(&mut self, mut delete: DeleteRequest) {
+    fn sink_delete(&mut self, mut delete: DeleteRequest) -> Result<()> {
         match delete.cf.as_str() {
             "lock" => {
                 let raw_key = Key::from_encoded(delete.take_key()).into_raw().unwrap();
@@ -862,11 +1000,8 @@ impl Delegate {
                     Some(ref mut resolver) => resolver.untrack_lock(&raw_key, None),
                     None => {
                         assert!(self.pending.is_some(), "region resolver not ready");
-                        let key_len = raw_key.len();
                         let pending = self.pending.as_mut().unwrap();
-                        pending.locks.push(PendingLock::Untrack { key: raw_key });
-                        pending.pending_bytes += key_len;
-                        CDC_PENDING_BYTES_GAUGE.add(key_len as i64);
+                        pending.push_pending_lock(PendingLock::Untrack { key: raw_key })?;
                     }
                 }
             }
@@ -875,6 +1010,7 @@ impl Delegate {
                 panic!("invalid cf {}", other);
             }
         }
+        Ok(())
     }
 
     fn sink_admin(&mut self, request: AdminRequest, mut response: AdminResponse) -> Result<()> {
@@ -945,7 +1081,7 @@ impl Delegate {
     }
 
     fn stop_observing(&self) {
-        info!("stop observing"; "region_id" => self.region_id, "failed" => self.failed);
+        info!("cdc stop observing"; "region_id" => self.region_id, "failed" => self.failed);
         // Stop observe further events.
         self.handle.stop_observing();
         // To inform transaction layer no more old values are required for the region.
@@ -1142,6 +1278,10 @@ impl ObservedRange {
         entries.retain(|e| self.is_key_in_range(&self.start_key_raw, &self.end_key_raw, &e.key));
         entries
     }
+
+    fn contains_raw_key(&self, key: &[u8]) -> bool {
+        self.is_key_in_range(&self.start_key_raw, &self.end_key_raw, key)
+    }
 }
 
 #[cfg(test)]
@@ -1151,9 +1291,10 @@ mod tests {
     use api_version::RawValue;
     use futures::{executor::block_on, stream::StreamExt};
     use kvproto::{errorpb::Error as ErrorHeader, metapb::Region};
+    use tikv_util::memory::MemoryQuota;
 
     use super::*;
-    use crate::channel::{channel, recv_timeout, MemoryQuota};
+    use crate::channel::{channel, recv_timeout};
 
     #[test]
     fn test_error() {
@@ -1165,8 +1306,8 @@ mod tests {
         region.mut_region_epoch().set_conf_ver(2);
         let region_epoch = region.get_region_epoch().clone();
 
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
-        let (sink, mut drain) = crate::channel::channel(1, quota);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (sink, mut drain) = channel(ConnId::default(), 1, quota);
         let rx = drain.drain();
         let request_id = 123;
         let mut downstream = Downstream::new(
@@ -1179,11 +1320,18 @@ mod tests {
             ObservedRange::default(),
         );
         downstream.set_sink(sink);
-        let mut delegate = Delegate::new(region_id, Default::default());
+        let memory_quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let mut delegate = Delegate::new(region_id, Default::default(), memory_quota);
         delegate.subscribe(downstream).unwrap();
         assert!(delegate.handle.is_observing());
-        let resolver = Resolver::new(region_id);
-        assert!(delegate.on_region_ready(resolver, region).is_empty());
+        let memory_quota = Arc::new(MemoryQuota::new(std::usize::MAX));
+        let resolver = Resolver::new(region_id, memory_quota);
+        assert!(
+            delegate
+                .on_region_ready(resolver, region)
+                .unwrap()
+                .is_empty()
+        );
         assert!(delegate.downstreams()[0].observed_range.all_key_covered);
 
         let rx_wrap = Cell::new(Some(rx));
@@ -1307,8 +1455,9 @@ mod tests {
         };
 
         // Create a new delegate.
+        let memory_quota = Arc::new(MemoryQuota::new(usize::MAX));
         let txn_extra_op = Arc::new(AtomicCell::new(TxnExtraOp::Noop));
-        let mut delegate = Delegate::new(1, txn_extra_op.clone());
+        let mut delegate = Delegate::new(1, txn_extra_op.clone(), memory_quota);
         assert_eq!(txn_extra_op.load(), TxnExtraOp::Noop);
         assert!(delegate.handle.is_observing());
 
@@ -1333,7 +1482,10 @@ mod tests {
         region.mut_region_epoch().set_conf_ver(1);
         region.mut_region_epoch().set_version(1);
         {
-            let failures = delegate.on_region_ready(Resolver::new(1), region);
+            let memory_quota = Arc::new(MemoryQuota::new(std::usize::MAX));
+            let failures = delegate
+                .on_region_ready(Resolver::new(1, memory_quota), region)
+                .unwrap();
             assert_eq!(failures.len(), 1);
             let id = failures[0].0.id;
             delegate.unsubscribe(id, None);
@@ -1424,8 +1576,9 @@ mod tests {
             Key::from_raw(b"d").into_encoded(),
         )
         .unwrap();
+        let memory_quota = Arc::new(MemoryQuota::new(usize::MAX));
         let txn_extra_op = Arc::new(AtomicCell::new(TxnExtraOp::Noop));
-        let mut delegate = Delegate::new(1, txn_extra_op);
+        let mut delegate = Delegate::new(1, txn_extra_op, memory_quota);
         assert!(delegate.handle.is_observing());
 
         let mut map = HashMap::default();
@@ -1438,41 +1591,35 @@ mod tests {
                 put.key.clone(),
                 1.into(),
                 10,
-                None,
+                Some(b"value".to_vec()),
                 TimeStamp::zero(),
                 0,
                 TimeStamp::zero(),
                 false,
             )
             .to_bytes();
-            delegate
-                .sink_txn_put(
-                    put,
-                    false,
-                    &mut map,
-                    |_: &mut EventRow, _: TimeStamp| Ok(()),
-                )
-                .unwrap();
+            delegate.sink_txn_put(put, false, &mut map).unwrap();
         }
         assert_eq!(map.len(), 5);
 
-        let (sink, mut drain) = channel(1, MemoryQuota::new(1024));
+        let conn_id = ConnId::default();
+        let (sink, mut drain) = channel(conn_id, 1, Arc::new(MemoryQuota::new(1024)));
         let downstream = Downstream {
             id: DownstreamId::new(),
             req_id: 1,
-            conn_id: ConnId::new(),
+            conn_id,
             peer: String::new(),
             region_epoch: RegionEpoch::default(),
             sink: Some(sink),
             state: Arc::new(AtomicCell::new(DownstreamState::Normal)),
+            scan_truncated: Arc::new(Default::default()),
             kv_api: ChangeDataRequestKvApi::TiDb,
             filter_loop: false,
             observed_range,
         };
         delegate.add_downstream(downstream);
-        let entries = map.values().map(|(r, _)| r).cloned().collect();
         delegate
-            .sink_downstream(entries, 1, ChangeDataRequestKvApi::TiDb)
+            .sink_downstream_tidb(map.into_values(), |_, _| Ok(()))
             .unwrap();
 
         let (mut tx, mut rx) = futures::channel::mpsc::unbounded();
@@ -1493,8 +1640,9 @@ mod tests {
             Key::from_raw(b"f").into_encoded(),
         )
         .unwrap();
+        let memory_quota = Arc::new(MemoryQuota::new(usize::MAX));
         let txn_extra_op = Arc::new(AtomicCell::new(TxnExtraOp::Noop));
-        let mut delegate = Delegate::new(1, txn_extra_op);
+        let mut delegate = Delegate::new(1, txn_extra_op, memory_quota);
         assert!(delegate.handle.is_observing());
 
         let mut map = HashMap::default();
@@ -1507,7 +1655,7 @@ mod tests {
                 put.key.clone(),
                 1.into(),
                 10,
-                None,
+                Some(b"value".to_vec()),
                 TimeStamp::zero(),
                 0,
                 TimeStamp::zero(),
@@ -1518,34 +1666,28 @@ mod tests {
                 lock = lock.set_txn_source(txn_source.into());
             }
             put.value = lock.to_bytes();
-            delegate
-                .sink_txn_put(
-                    put,
-                    false,
-                    &mut map,
-                    |_: &mut EventRow, _: TimeStamp| Ok(()),
-                )
-                .unwrap();
+            delegate.sink_txn_put(put, false, &mut map).unwrap();
         }
         assert_eq!(map.len(), 5);
 
-        let (sink, mut drain) = channel(1, MemoryQuota::new(1024));
+        let conn_id = ConnId::default();
+        let (sink, mut drain) = channel(conn_id, 1, Arc::new(MemoryQuota::new(1024)));
         let downstream = Downstream {
             id: DownstreamId::new(),
             req_id: 1,
-            conn_id: ConnId::new(),
+            conn_id,
             peer: String::new(),
             region_epoch: RegionEpoch::default(),
             sink: Some(sink),
             state: Arc::new(AtomicCell::new(DownstreamState::Normal)),
+            scan_truncated: Arc::new(Default::default()),
             kv_api: ChangeDataRequestKvApi::TiDb,
             filter_loop,
             observed_range,
         };
         delegate.add_downstream(downstream);
-        let entries = map.values().map(|(r, _)| r).cloned().collect();
         delegate
-            .sink_downstream(entries, 1, ChangeDataRequestKvApi::TiDb)
+            .sink_downstream_tidb(map.into_values(), |_, _| Ok(()))
             .unwrap();
 
         let (mut tx, mut rx) = futures::channel::mpsc::unbounded();

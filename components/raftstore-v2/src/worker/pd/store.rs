@@ -9,7 +9,7 @@ use kvproto::pdpb;
 use pd_client::{
     metrics::{
         REGION_READ_BYTES_HISTOGRAM, REGION_READ_KEYS_HISTOGRAM, REGION_WRITTEN_BYTES_HISTOGRAM,
-        REGION_WRITTEN_KEYS_HISTOGRAM, STORE_SIZE_GAUGE_VEC,
+        REGION_WRITTEN_KEYS_HISTOGRAM, STORE_SIZE_EVENT_INT_VEC,
     },
     PdClient,
 };
@@ -22,6 +22,7 @@ use slog::{error, info, warn};
 use tikv_util::{
     metrics::RecordPairVec,
     store::QueryStats,
+    sys::disk::get_disk_space_stats,
     time::{Duration, Instant as TiInstant, UnixSecs},
     topn::TopN,
 };
@@ -263,15 +264,9 @@ where
         self.store_stat.region_bytes_read.flush();
         self.store_stat.region_keys_read.flush();
 
-        STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["capacity"])
-            .set(capacity as i64);
-        STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["available"])
-            .set(available as i64);
-        STORE_SIZE_GAUGE_VEC
-            .with_label_values(&["used"])
-            .set(used_size as i64);
+        STORE_SIZE_EVENT_INT_VEC.capacity.set(capacity as i64);
+        STORE_SIZE_EVENT_INT_VEC.available.set(available as i64);
+        STORE_SIZE_EVENT_INT_VEC.used.set(used_size as i64);
 
         // Update slowness statistics
         self.update_slowness_in_store_stats(&mut stats, last_query_sum);
@@ -447,7 +442,8 @@ where
 
     /// Returns (capacity, used, available).
     fn collect_engine_size(&self) -> Option<(u64, u64, u64)> {
-        let disk_stats = match fs2::statvfs(self.tablet_registry.tablet_root()) {
+        let (disk_cap, disk_avail) = match get_disk_space_stats(self.tablet_registry.tablet_root())
+        {
             Err(e) => {
                 error!(
                     self.logger,
@@ -457,9 +453,8 @@ where
                 );
                 return None;
             }
-            Ok(stats) => stats,
+            Ok((total_size, available_size)) => (total_size, available_size),
         };
-        let disk_cap = disk_stats.total_space();
         let capacity = if self.cfg.value().capacity.0 == 0 {
             disk_cap
         } else {
@@ -473,16 +468,20 @@ where
             true
         });
         let snap_size = self.snap_mgr.total_snap_size().unwrap();
-        let used_size = snap_size
-            + kv_size
-            + self
-                .raft_engine
-                .get_engine_size()
-                .expect("raft engine used size");
+        let raft_size = self
+            .raft_engine
+            .get_engine_size()
+            .expect("engine used size");
+
+        STORE_SIZE_EVENT_INT_VEC.kv_size.set(kv_size as i64);
+        STORE_SIZE_EVENT_INT_VEC.raft_size.set(raft_size as i64);
+        STORE_SIZE_EVENT_INT_VEC.snap_size.set(snap_size as i64);
+
+        let used_size = snap_size + kv_size + raft_size;
         let mut available = capacity.checked_sub(used_size).unwrap_or_default();
         // We only care about rocksdb SST file size, so we should check disk available
         // here.
-        available = cmp::min(available, disk_stats.available_space());
+        available = cmp::min(available, disk_avail);
         Some((capacity, used_size, available))
     }
 }

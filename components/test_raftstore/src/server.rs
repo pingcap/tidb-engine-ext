@@ -37,8 +37,9 @@ use raftstore::{
     store::{
         fsm::{store::StoreMeta, ApplyRouter, RaftBatchSystem, RaftRouter},
         msg::RaftCmdExtraOpts,
-        AutoSplitController, Callback, CheckLeaderRunner, LocalReader, RegionSnapshot, SnapManager,
-        SnapManagerBuilder, SplitCheckRunner, SplitConfigManager, StoreMetaDelegate,
+        AutoSplitController, Callback, CheckLeaderRunner, DiskCheckRunner, LocalReader,
+        RegionSnapshot, SnapManager, SnapManagerBuilder, SplitCheckRunner, SplitConfigManager,
+        StoreMetaDelegate,
     },
     Result,
 };
@@ -113,8 +114,8 @@ impl StoreAddrResolver for AddressMap {
     fn resolve(
         &self,
         store_id: u64,
-        cb: Box<dyn FnOnce(ServerResult<String>) + Send>,
-    ) -> ServerResult<()> {
+        cb: Box<dyn FnOnce(resolve::Result<String>) + Send>,
+    ) -> resolve::Result<()> {
         let addr = self.get(store_id);
         match addr {
             Some(addr) => cb(Ok(addr)),
@@ -451,6 +452,7 @@ impl ServerCluster {
             Arc::clone(&importer),
             None,
             resource_manager.clone(),
+            Arc::new(region_info_accessor.clone()),
         );
 
         // Create deadlock service.
@@ -616,6 +618,7 @@ impl ServerCluster {
             concurrency_manager.clone(),
             collector_reg_handle,
             causal_ts_provider,
+            DiskCheckRunner::dummy(),
             GrpcServiceManager::dummy(),
             Arc::new(AtomicU64::new(0)),
         )?;

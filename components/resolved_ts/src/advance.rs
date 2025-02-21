@@ -43,7 +43,7 @@ use tokio::{
 };
 use txn_types::TimeStamp;
 
-use crate::{endpoint::Task, metrics::*};
+use crate::{endpoint::Task, metrics::*, TsSource};
 
 pub(crate) const DEFAULT_CHECK_LEADER_TIMEOUT_DURATION: Duration = Duration::from_secs(5); // 5s
 const DEFAULT_GRPC_GZIP_COMPRESSION_LEVEL: usize = 2;
@@ -51,13 +51,12 @@ const DEFAULT_GRPC_MIN_MESSAGE_SIZE_TO_COMPRESS: usize = 4096;
 
 pub struct AdvanceTsWorker {
     pd_client: Arc<dyn PdClient>,
-    advance_ts_interval: Duration,
     timer: SteadyTimer,
     worker: Runtime,
     scheduler: Scheduler<Task>,
     /// The concurrency manager for transactions. It's needed for CDC to check
     /// locks when calculating resolved_ts.
-    concurrency_manager: ConcurrencyManager,
+    pub(crate) concurrency_manager: ConcurrencyManager,
 
     // cache the last pd tso, used to approximate the next timestamp w/o an actual TSO RPC
     pub(crate) last_pd_tso: Arc<std::sync::Mutex<Option<(TimeStamp, Instant)>>>,
@@ -65,7 +64,6 @@ pub struct AdvanceTsWorker {
 
 impl AdvanceTsWorker {
     pub fn new(
-        advance_ts_interval: Duration,
         pd_client: Arc<dyn PdClient>,
         scheduler: Scheduler<Task>,
         concurrency_manager: ConcurrencyManager,
@@ -81,7 +79,6 @@ impl AdvanceTsWorker {
             scheduler,
             pd_client,
             worker,
-            advance_ts_interval,
             timer: SteadyTimer::default(),
             concurrency_manager,
             last_pd_tso: Arc::new(std::sync::Mutex::new(None)),
@@ -104,7 +101,7 @@ impl AdvanceTsWorker {
         let timeout = self.timer.delay(advance_ts_interval);
         let min_timeout = self.timer.delay(cmp::min(
             DEFAULT_CHECK_LEADER_TIMEOUT_DURATION,
-            self.advance_ts_interval,
+            advance_ts_interval,
         ));
 
         let last_pd_tso = self.last_pd_tso.clone();
@@ -114,23 +111,28 @@ impl AdvanceTsWorker {
             if let Ok(mut last_pd_tso) = last_pd_tso.try_lock() {
                 *last_pd_tso = Some((min_ts, Instant::now()));
             }
+            let mut ts_source = TsSource::PdTso;
 
             // Sync with concurrency manager so that it can work correctly when
             // optimizations like async commit is enabled.
             // Note: This step must be done before scheduling `Task::MinTs` task, and the
             // resolver must be checked in or after `Task::MinTs`' execution.
             cm.update_max_ts(min_ts);
-            if let Some(min_mem_lock_ts) = cm.global_min_lock_ts() {
+            if let Some((min_mem_lock_ts, lock)) = cm.global_min_lock() {
                 if min_mem_lock_ts < min_ts {
                     min_ts = min_mem_lock_ts;
+                    ts_source = TsSource::MemoryLock(lock);
                 }
             }
 
-            let regions = leader_resolver.resolve(regions, min_ts).await;
+            let regions = leader_resolver
+                .resolve(regions, min_ts, Some(advance_ts_interval))
+                .await;
             if !regions.is_empty() {
                 if let Err(e) = scheduler.schedule(Task::ResolvedTsAdvanced {
                     regions,
                     ts: min_ts,
+                    ts_source,
                 }) {
                     info!("failed to schedule advance event"; "err" => ?e);
                 }
@@ -164,10 +166,7 @@ pub struct LeadershipResolver {
 
     // store_id -> check leader request, record the request to each stores.
     store_req_map: HashMap<u64, CheckLeaderRequest>,
-    // region_id -> region, cache the information of regions.
-    region_map: HashMap<u64, Vec<Peer>>,
-    // region_id -> peers id, record the responses.
-    resp_map: HashMap<u64, Vec<u64>>,
+    progresses: HashMap<u64, RegionProgress>,
     checking_regions: HashSet<u64>,
     valid_regions: HashSet<u64>,
 
@@ -193,8 +192,7 @@ impl LeadershipResolver {
             region_read_progress,
 
             store_req_map: HashMap::default(),
-            region_map: HashMap::default(),
-            resp_map: HashMap::default(),
+            progresses: HashMap::default(),
             valid_regions: HashSet::default(),
             checking_regions: HashSet::default(),
             last_gc_time: Instant::now_coarse(),
@@ -206,8 +204,7 @@ impl LeadershipResolver {
         let now = Instant::now_coarse();
         if now - self.last_gc_time > self.gc_interval {
             self.store_req_map = HashMap::default();
-            self.region_map = HashMap::default();
-            self.resp_map = HashMap::default();
+            self.progresses = HashMap::default();
             self.valid_regions = HashSet::default();
             self.checking_regions = HashSet::default();
             self.last_gc_time = now;
@@ -219,10 +216,7 @@ impl LeadershipResolver {
             v.regions.clear();
             v.ts = 0;
         }
-        for v in self.region_map.values_mut() {
-            v.clear();
-        }
-        for v in self.resp_map.values_mut() {
+        for v in self.progresses.values_mut() {
             v.clear();
         }
         self.checking_regions.clear();
@@ -233,7 +227,12 @@ impl LeadershipResolver {
     // This function broadcasts a special message to all stores, gets the leader id
     // of them to confirm whether current peer has a quorum which accepts its
     // leadership.
-    pub async fn resolve(&mut self, regions: Vec<u64>, min_ts: TimeStamp) -> Vec<u64> {
+    pub async fn resolve(
+        &mut self,
+        regions: Vec<u64>,
+        min_ts: TimeStamp,
+        timeout: Option<Duration>,
+    ) -> Vec<u64> {
         if regions.is_empty() {
             return regions;
         }
@@ -249,8 +248,7 @@ impl LeadershipResolver {
 
         let store_id = self.store_id;
         let valid_regions = &mut self.valid_regions;
-        let region_map = &mut self.region_map;
-        let resp_map = &mut self.resp_map;
+        let progresses = &mut self.progresses;
         let store_req_map = &mut self.store_req_map;
         let checking_regions = &mut self.checking_regions;
         for region_id in &regions {
@@ -272,13 +270,13 @@ impl LeadershipResolver {
                 }
                 let leader_info = core.get_leader_info();
 
+                let prog = progresses
+                    .entry(*region_id)
+                    .or_insert_with(|| RegionProgress::new(peer_list.len()));
                 let mut unvotes = 0;
                 for peer in peer_list {
                     if peer.store_id == store_id && peer.id == leader_id {
-                        resp_map
-                            .entry(*region_id)
-                            .or_insert_with(|| Vec::with_capacity(peer_list.len()))
-                            .push(store_id);
+                        prog.resps.push(store_id);
                     } else {
                         // It's still necessary to check leader on learners even if they don't vote
                         // because performing stale read on learners require it.
@@ -296,15 +294,14 @@ impl LeadershipResolver {
                         }
                     }
                 }
+
                 // Check `region_has_quorum` here because `store_map` can be empty,
                 // in which case `region_has_quorum` won't be called any more.
-                if unvotes == 0 && region_has_quorum(peer_list, &resp_map[region_id]) {
+                if unvotes == 0 && region_has_quorum(peer_list, &prog.resps) {
+                    prog.resolved = true;
                     valid_regions.insert(*region_id);
                 } else {
-                    region_map
-                        .entry(*region_id)
-                        .or_insert_with(|| Vec::with_capacity(peer_list.len()))
-                        .extend_from_slice(peer_list);
+                    prog.peers.extend_from_slice(peer_list);
                 }
             }
         });
@@ -318,8 +315,9 @@ impl LeadershipResolver {
             .values()
             .find(|req| !req.regions.is_empty())
             .map_or(0, |req| req.regions[0].compute_size());
-        let store_count = store_req_map.len();
         let mut check_leader_rpcs = Vec::with_capacity(store_req_map.len());
+        let timeout = get_min_timeout(timeout, DEFAULT_CHECK_LEADER_TIMEOUT_DURATION);
+
         for (store_id, req) in store_req_map {
             if req.regions.is_empty() {
                 continue;
@@ -334,9 +332,16 @@ impl LeadershipResolver {
             let rpc = async move {
                 PENDING_CHECK_LEADER_REQ_COUNT.inc();
                 defer!(PENDING_CHECK_LEADER_REQ_COUNT.dec());
-                let client = get_tikv_client(to_store, pd_client, security_mgr, env, tikv_clients)
-                    .await
-                    .map_err(|e| (to_store, e.retryable(), format!("[get tikv client] {}", e)))?;
+                let client = get_tikv_client(
+                    to_store,
+                    pd_client,
+                    security_mgr,
+                    env,
+                    tikv_clients,
+                    timeout,
+                )
+                .await
+                .map_err(|e| (to_store, e.retryable(), format!("[get tikv client] {}", e)))?;
 
                 // Set min_ts in the request.
                 req.set_ts(min_ts.into_inner());
@@ -367,7 +372,6 @@ impl LeadershipResolver {
 
                 PENDING_CHECK_LEADER_REQ_SENT_COUNT.inc();
                 defer!(PENDING_CHECK_LEADER_REQ_SENT_COUNT.dec());
-                let timeout = DEFAULT_CHECK_LEADER_TIMEOUT_DURATION;
                 let resp = tokio::time::timeout(timeout, rpc)
                     .map_err(|e| (to_store, true, format!("[timeout] {}", e)))
                     .await?
@@ -384,6 +388,7 @@ impl LeadershipResolver {
                 .with_label_values(&["all"])
                 .observe(start.saturating_elapsed_secs());
         });
+
         let rpc_count = check_leader_rpcs.len();
         for _ in 0..rpc_count {
             // Use `select_all` to avoid the process getting blocked when some
@@ -393,10 +398,16 @@ impl LeadershipResolver {
             match res {
                 Ok((to_store, resp)) => {
                     for region_id in resp.regions {
-                        resp_map
-                            .entry(region_id)
-                            .or_insert_with(|| Vec::with_capacity(store_count))
-                            .push(to_store);
+                        if let Some(prog) = progresses.get_mut(&region_id) {
+                            if prog.resolved {
+                                continue;
+                            }
+                            prog.resps.push(to_store);
+                            if region_has_quorum(&prog.peers, &prog.resps) {
+                                prog.resolved = true;
+                                valid_regions.insert(region_id);
+                            }
+                        }
                     }
                 }
                 Err((to_store, reconnect, err)) => {
@@ -406,24 +417,19 @@ impl LeadershipResolver {
                     }
                 }
             }
-        }
-        for (region_id, prs) in region_map {
-            if prs.is_empty() {
-                // The peer had the leadership before, but now it's no longer
-                // the case. Skip checking the region.
-                continue;
-            }
-            if let Some(resp) = resp_map.get(region_id) {
-                if resp.is_empty() {
-                    // No response, maybe the peer lost leadership.
-                    continue;
-                }
-                if region_has_quorum(prs, resp) {
-                    valid_regions.insert(*region_id);
-                }
+            if valid_regions.len() >= progresses.len() {
+                break;
             }
         }
-        self.valid_regions.drain().collect()
+        let res: Vec<u64> = self.valid_regions.drain().collect();
+        if res.len() != checking_regions.len() {
+            warn!(
+                "check leader returns valid regions different from checking regions";
+                "valid_regions" => res.len(),
+                "checking_regions" => checking_regions.len(),
+            );
+        }
+        res
     }
 }
 
@@ -458,6 +464,11 @@ where
 
     let resps = futures::future::join_all(reqs).await;
     resps.into_iter().flatten().collect::<Vec<u64>>()
+}
+
+#[inline]
+fn get_min_timeout(timeout: Option<Duration>, default: Duration) -> Duration {
+    timeout.unwrap_or(default).min(default)
 }
 
 fn region_has_quorum(peers: &[Peer], stores: &[u64]) -> bool {
@@ -516,6 +527,7 @@ async fn get_tikv_client(
     security_mgr: &SecurityManager,
     env: Arc<Environment>,
     tikv_clients: &Mutex<HashMap<u64, TikvClient>>,
+    timeout: Duration,
 ) -> pd_client::Result<TikvClient> {
     {
         let clients = tikv_clients.lock().await;
@@ -523,7 +535,6 @@ async fn get_tikv_client(
             return Ok(client);
         }
     }
-    let timeout = DEFAULT_CHECK_LEADER_TIMEOUT_DURATION;
     let store = tokio::time::timeout(timeout, pd_client.get_store_async(store_id))
         .await
         .map_err(|e| pd_client::Error::Other(Box::new(e)))
@@ -547,6 +558,27 @@ async fn get_tikv_client(
     clients.insert(store_id, cli.clone());
     RTS_TIKV_CLIENT_INIT_DURATION_HISTOGRAM.observe(start.saturating_elapsed_secs());
     Ok(cli)
+}
+
+struct RegionProgress {
+    resolved: bool,
+    peers: Vec<Peer>,
+    resps: Vec<u64>,
+}
+
+impl RegionProgress {
+    fn new(len: usize) -> Self {
+        RegionProgress {
+            resolved: false,
+            peers: Vec::with_capacity(len),
+            resps: Vec::with_capacity(len),
+        }
+    }
+    fn clear(&mut self) {
+        self.resolved = false;
+        self.peers.clear();
+        self.resps.clear();
+    }
 }
 
 #[cfg(test)]
@@ -641,19 +673,45 @@ mod tests {
             .region_read_progress
             .insert(2, Arc::new(progress2));
 
-        leader_resolver.resolve(vec![1, 2], TimeStamp::new(1)).await;
+        leader_resolver
+            .resolve(vec![1, 2], TimeStamp::new(1), None)
+            .await;
         let req = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(req.regions.len(), 2);
 
         // Checking one region only send 1 region in request.
-        leader_resolver.resolve(vec![1], TimeStamp::new(1)).await;
+        leader_resolver
+            .resolve(vec![1], TimeStamp::new(1), None)
+            .await;
         let req = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(req.regions.len(), 1);
 
         // Checking zero region does not send request.
-        leader_resolver.resolve(vec![], TimeStamp::new(1)).await;
+        leader_resolver
+            .resolve(vec![], TimeStamp::new(1), None)
+            .await;
         rx.recv_timeout(Duration::from_secs(1)).unwrap_err();
 
         let _ = server.shutdown().await;
+    }
+
+    #[test]
+    fn test_get_min_timeout() {
+        assert_eq!(
+            get_min_timeout(None, Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            get_min_timeout(None, Duration::from_secs(2)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            get_min_timeout(Some(Duration::from_secs(1)), Duration::from_secs(5)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            get_min_timeout(Some(Duration::from_secs(20)), Duration::from_secs(5)),
+            Duration::from_secs(5)
+        );
     }
 }

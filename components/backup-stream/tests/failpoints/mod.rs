@@ -9,7 +9,13 @@ pub use suite::*;
 
 mod all {
 
-    use std::time::Duration;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     use backup_stream::{
         metadata::{
@@ -19,18 +25,48 @@ mod all {
         GetCheckpointResult, RegionCheckpointOperation, RegionSet, Task,
     };
     use futures::executor::block_on;
-    use tikv_util::defer;
+    use tikv_util::{
+        config::{ReadableDuration, ReadableSize},
+        defer,
+    };
+    use txn_types::Key;
 
     use super::{
         make_record_key, make_split_key_at_record, mutation, run_async_test, SuiteBuilder,
     };
+    use crate::{make_table_key, Suite};
+
+    #[test]
+    fn failed_register_task() {
+        let suite = SuiteBuilder::new_named("failed_register_task").build();
+        fail::cfg("load_task::error_when_fetching_ranges", "return").unwrap();
+        let cli = suite.get_meta_cli();
+        block_on(cli.insert_task_with_range(
+            &suite.simple_task("failed_register_task"),
+            &[(&make_table_key(1, b""), &make_table_key(2, b""))],
+        ))
+        .unwrap();
+
+        for _ in 0..10 {
+            if block_on(cli.get_last_error_of("failed_register_task", 1))
+                .unwrap()
+                .is_some()
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        suite.dump_slash_etc();
+        panic!("No error uploaded when failed to comminate to PD.");
+    }
 
     #[test]
     fn basic() {
         let mut suite = SuiteBuilder::new_named("basic").build();
         fail::cfg("try_start_observe", "1*return").unwrap();
 
-        run_async_test(async {
+        let (round1, round2) = run_async_test(async {
             // write data before the task starting, for testing incremental scanning.
             let round1 = suite.write_records(0, 128, 1).await;
             suite.must_register_task(1, "test_basic");
@@ -38,13 +74,13 @@ mod all {
             let round2 = suite.write_records(256, 128, 1).await;
             suite.force_flush_files("test_basic");
             suite.wait_for_flush();
-            suite
-                .check_for_write_records(
-                    suite.flushed_files.path(),
-                    round1.union(&round2).map(Vec::as_slice),
-                )
-                .await;
+            (round1, round2)
         });
+        suite.check_for_write_records(
+            suite.flushed_files.path(),
+            round1.union(&round2).map(Vec::as_slice),
+        );
+
         suite.cluster.shutdown();
     }
     #[test]
@@ -97,10 +133,10 @@ mod all {
         let keys2 = run_async_test(suite.write_records(256, 128, 1));
         suite.force_flush_files("region_failure");
         suite.wait_for_flush();
-        run_async_test(suite.check_for_write_records(
+        suite.check_for_write_records(
             suite.flushed_files.path(),
             keys.union(&keys2).map(|s| s.as_slice()),
-        ));
+        );
     }
     #[test]
     fn initial_scan_failure() {
@@ -121,10 +157,10 @@ mod all {
         let keys2 = run_async_test(suite.write_records(256, 128, 1));
         suite.force_flush_files("initial_scan_failure");
         suite.wait_for_flush();
-        run_async_test(suite.check_for_write_records(
+        suite.check_for_write_records(
             suite.flushed_files.path(),
             keys.union(&keys2).map(|s| s.as_slice()),
-        ));
+        );
     }
     #[test]
     fn failed_during_refresh_region() {
@@ -147,10 +183,10 @@ mod all {
         let keys2 = run_async_test(suite.write_records(256, 128, 1));
         suite.force_flush_files("fail_to_refresh_region");
         suite.wait_for_flush();
-        run_async_test(suite.check_for_write_records(
+        suite.check_for_write_records(
             suite.flushed_files.path(),
             keys.union(&keys2).map(|s| s.as_slice()),
-        ));
+        );
         let leader = suite.cluster.leader_of_region(1).unwrap().store_id;
         let (tx, rx) = std::sync::mpsc::channel();
         suite.endpoints[&leader]
@@ -186,7 +222,8 @@ mod all {
         suite.must_split(&make_split_key_at_record(1, 42));
         std::thread::sleep(Duration::from_secs(2));
 
-        let error = run_async_test(suite.get_meta_cli().get_last_error("retry_abort", 1)).unwrap();
+        let error =
+            run_async_test(suite.get_meta_cli().get_last_error_of("retry_abort", 1)).unwrap();
         let error = error.expect("no error uploaded");
         error
             .get_error_message()
@@ -212,12 +249,7 @@ mod all {
         let items = run_async_test(suite.write_records(0, 128, 1));
         suite.force_flush_files("retry_abort");
         suite.wait_for_flush();
-        run_async_test(
-            suite.check_for_write_records(
-                suite.flushed_files.path(),
-                items.iter().map(Vec::as_slice),
-            ),
-        );
+        suite.check_for_write_records(suite.flushed_files.path(), items.iter().map(Vec::as_slice));
     }
     #[test]
     fn failure_and_split() {
@@ -240,12 +272,139 @@ mod all {
         let round2 = run_async_test(suite.write_records(256, 128, 1));
         suite.force_flush_files("failure_and_split");
         suite.wait_for_flush();
-        run_async_test(suite.check_for_write_records(
+        suite.check_for_write_records(
             suite.flushed_files.path(),
             round1.union(&round2).map(Vec::as_slice),
-        ));
+        );
         let cp = suite.global_checkpoint();
         assert!(cp > 512, "it is {}", cp);
         suite.cluster.shutdown();
+    }
+
+    #[test]
+    fn memory_quota() {
+        let mut suite = SuiteBuilder::new_named("memory_quota")
+            .cfg(|cfg| cfg.initial_scan_pending_memory_quota = ReadableSize::kb(2))
+            .build();
+        let keys = run_async_test(suite.write_records(0, 128, 1));
+        let failed = Arc::new(AtomicBool::new(false));
+        fail::cfg("router_on_event_delay_ms", "6*return(1000)").unwrap();
+        fail::cfg_callback("scan_and_async_send::about_to_consume", {
+            let failed = failed.clone();
+            move || {
+                let v = backup_stream::metrics::HEAP_MEMORY.get();
+                // Not greater than max key length * concurrent initial scan number.
+                if v > 4096 * 6 {
+                    println!("[[ FAILED ]] The memory usage is {v} which exceeds the quota");
+                    failed.store(true, Ordering::SeqCst);
+                }
+            }
+        })
+        .unwrap();
+        suite.must_register_task(1, "memory_quota");
+        suite.force_flush_files("memory_quota");
+        suite.wait_for_flush();
+        suite.check_for_write_records(
+            suite.flushed_files.path(),
+            keys.iter().map(|v| v.as_slice()),
+        );
+        assert!(!failed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn failed_to_get_task_when_pausing() {
+        let suite = SuiteBuilder::new_named("resume_error").nodes(1).build();
+        suite.must_register_task(1, "resume_error");
+        let mcli = suite.get_meta_cli();
+        run_async_test(mcli.pause("resume_error")).unwrap();
+        suite.sync();
+        fail::cfg("failed_to_get_task", "1*return").unwrap();
+        run_async_test(mcli.resume("resume_error")).unwrap();
+        suite.sync();
+        // Make sure our suite doesn't panic.
+        suite.sync();
+    }
+
+    #[test]
+    fn resolve_during_flushing() {
+        let mut suite = SuiteBuilder::new_named("resolve_during_flushing")
+            .cfg(|cfg| {
+                cfg.min_ts_interval = ReadableDuration::days(1);
+                cfg.initial_scan_concurrency = 1;
+            })
+            .nodes(2)
+            .build();
+        suite.must_register_task(1, "resolve_during_flushing");
+        let key = make_record_key(1, 1);
+
+        let start_ts = suite.tso();
+        suite.must_kv_prewrite(
+            1,
+            vec![mutation(
+                key.clone(),
+                Suite::PROMISED_SHORT_VALUE.to_owned(),
+            )],
+            key.clone(),
+            start_ts,
+        );
+        fail::cfg("after_moving_to_flushing_files", "pause").unwrap();
+        suite.force_flush_files("resolve_during_flushing");
+        let commit_ts = suite.tso();
+        suite.just_commit_a_key(key.clone(), start_ts, commit_ts);
+        suite.run(|| Task::RegionCheckpointsOp(RegionCheckpointOperation::PrepareMinTsForResolve));
+        // Wait until the resolve done. Sadly for now we don't have good solutions :(
+        std::thread::sleep(Duration::from_secs(2));
+        fail::remove("after_moving_to_flushing_files");
+        suite.wait_for_flush();
+        assert_eq!(suite.global_checkpoint(), start_ts.into_inner());
+        // transfer the leader, make sure everything has been flushed.
+        suite.must_shuffle_leader(1);
+        suite.wait_with(|cfg| cfg.initial_scan_semaphore.available_permits() > 0);
+        suite.force_flush_files("resolve_during_flushing");
+        suite.wait_for_flush();
+        let enc_key = Key::from_raw(&key).append_ts(commit_ts);
+        suite.check_for_write_records(
+            suite.flushed_files.path(),
+            std::iter::once(enc_key.as_encoded().as_slice()),
+        );
+    }
+
+    #[test]
+    fn commit_during_flushing() {
+        let mut suite = SuiteBuilder::new_named("commit_during_flushing")
+            .nodes(1)
+            .build();
+        suite.must_register_task(1, "commit_during_flushing");
+        let key = make_record_key(1, 1);
+        let start_ts = suite.tso();
+        suite.must_kv_prewrite(
+            1,
+            vec![mutation(
+                key.clone(),
+                Suite::PROMISED_SHORT_VALUE.to_owned(),
+            )],
+            key.clone(),
+            start_ts,
+        );
+        fail::cfg("subscription_manager_resolve_regions", "pause").unwrap();
+        let commit_ts = suite.tso();
+        suite.force_flush_files("commit_during_flushing");
+        suite.sync();
+        suite.sync();
+        fail::cfg("log_backup_batch_delay", "return(2000)").unwrap();
+        suite.just_commit_a_key(key.clone(), start_ts, commit_ts);
+        fail::remove("subscription_manager_resolve_regions");
+        suite.wait_for_flush();
+        let enc_key = Key::from_raw(&key).append_ts(commit_ts);
+        assert!(
+            suite.global_checkpoint() > commit_ts.into_inner(),
+            "{} {:?}",
+            suite.global_checkpoint(),
+            commit_ts
+        );
+        suite.check_for_write_records(
+            suite.flushed_files.path(),
+            std::iter::once(enc_key.as_encoded().as_slice()),
+        )
     }
 }

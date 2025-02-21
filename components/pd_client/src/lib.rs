@@ -24,7 +24,10 @@ use kvproto::{
     resource_manager::TokenBucketsRequest,
 };
 use pdpb::QueryStats;
-use tikv_util::time::{Instant, UnixSecs};
+use tikv_util::{
+    memory::HeapSize,
+    time::{Instant, UnixSecs},
+};
 use txn_types::TimeStamp;
 
 pub use self::{
@@ -133,6 +136,12 @@ impl BucketMeta {
     }
 }
 
+impl HeapSize for BucketMeta {
+    fn approximate_heap_size(&self) -> usize {
+        self.keys.approximate_heap_size() + self.sizes.approximate_heap_size()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BucketStat {
     pub meta: Arc<BucketMeta>,
@@ -209,6 +218,15 @@ impl BucketStat {
         for stat in self.stats.mut_write_keys() {
             *stat += key_count;
         }
+    }
+
+    pub fn clean_stats(&mut self, idx: usize) {
+        self.stats.write_keys[idx] = 0;
+        self.stats.write_bytes[idx] = 0;
+        self.stats.read_qps[idx] = 0;
+        self.stats.write_qps[idx] = 0;
+        self.stats.read_keys[idx] = 0;
+        self.stats.read_bytes[idx] = 0;
     }
 
     pub fn split(&mut self, idx: usize) {

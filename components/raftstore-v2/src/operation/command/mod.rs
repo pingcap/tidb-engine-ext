@@ -455,6 +455,11 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
         if is_leader {
             self.retry_pending_prepare_merge(ctx, apply_res.applied_index);
         }
+        if !apply_res.sst_applied_index.is_empty() {
+            self.storage_mut()
+                .apply_trace_mut()
+                .on_sst_ingested(&apply_res.sst_applied_index);
+        }
         self.on_data_modified(apply_res.modifications);
         self.handle_read_on_apply(
             ctx,
@@ -462,7 +467,7 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             apply_res.applied_index,
             progress_to_be_updated,
         );
-        self.try_compelete_recovery();
+        self.try_complete_recovery();
         if !self.pause_for_replay() && self.storage_mut().apply_trace_mut().should_flush() {
             if let Some(scheduler) = self.apply_scheduler() {
                 scheduler.send(ApplyTask::ManualFlush);
@@ -475,6 +480,12 @@ impl<EK: KvEngine, ER: RaftEngine> Peer<EK, ER> {
             self.set_has_ready();
         }
         self.check_unsafe_recovery_state(ctx);
+    }
+
+    pub fn post_propose_fail(&mut self, cmd_type: AdminCmdType) {
+        if cmd_type == AdminCmdType::PrepareMerge {
+            self.post_prepare_merge_fail();
+        }
     }
 }
 
@@ -583,6 +594,7 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
         fail::fail_point!("APPLY_COMMITTED_ENTRIES");
         fail::fail_point!("on_handle_apply_1003", self.peer_id() == 1003, |_| {});
         fail::fail_point!("on_handle_apply_2", self.peer_id() == 2, |_| {});
+        fail::fail_point!("on_handle_apply", |_| {});
         fail::fail_point!("on_handle_apply_store_1", self.store_id() == 1, |_| {});
         let now = std::time::Instant::now();
         let apply_wait_time = APPLY_TASK_WAIT_TIME_HISTOGRAM.local();
@@ -865,6 +877,7 @@ impl<EK: KvEngine, R: ApplyResReporter> Apply<EK, R> {
         apply_res.modifications = *self.modifications_mut();
         apply_res.metrics = mem::take(&mut self.metrics);
         apply_res.bucket_stat = self.buckets.clone();
+        apply_res.sst_applied_index = self.take_sst_applied_index();
         let written_bytes = apply_res.metrics.written_bytes;
 
         let skip_report = || -> bool {

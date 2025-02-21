@@ -36,11 +36,12 @@ use raftstore::{
 use resolved_ts::{resolve_by_raft, LeadershipResolver, Resolver};
 use security::SecurityManager;
 use tikv::{
-    config::CdcConfig,
+    config::{CdcConfig, ResolvedTsConfig},
     storage::{kv::LocalTablets, Statistics},
 };
 use tikv_util::{
     debug, defer, error, impl_display_as_debug, info,
+    memory::MemoryQuota,
     mpsc::bounded,
     slow_log,
     sys::thread::ThreadBuildWrapper,
@@ -56,9 +57,9 @@ use tokio::{
 use txn_types::{TimeStamp, TxnExtra, TxnExtraScheduler};
 
 use crate::{
-    channel::{CdcEvent, MemoryQuota, SendError},
+    channel::{CdcEvent, SendError},
     delegate::{on_init_downstream, Delegate, Downstream, DownstreamId, DownstreamState},
-    initializer::Initializer,
+    initializer::{InitializeStats, Initializer},
     metrics::*,
     old_value::{OldValueCache, OldValueCallback},
     service::{validate_kv_api, Conn, ConnId, FeatureGate},
@@ -78,6 +79,11 @@ pub enum Deregister {
     Request {
         conn_id: ConnId,
         request_id: u64,
+    },
+    Region {
+        conn_id: ConnId,
+        request_id: u64,
+        region_id: u64,
     },
     Downstream {
         conn_id: ConnId,
@@ -110,6 +116,16 @@ impl fmt::Debug for Deregister {
                 .field("deregister", &"request")
                 .field("conn_id", conn_id)
                 .field("request_id", request_id)
+                .finish(),
+            Deregister::Region {
+                ref conn_id,
+                ref request_id,
+                ref region_id,
+            } => de
+                .field("deregister", &"region")
+                .field("conn_id", conn_id)
+                .field("request_id", request_id)
+                .field("region_id", region_id)
                 .finish(),
             Deregister::Downstream {
                 ref conn_id,
@@ -144,6 +160,7 @@ type InitCallback = Box<dyn FnOnce() + Send>;
 pub enum Validate {
     Region(u64, Box<dyn FnOnce(Option<&Delegate>) + Send>),
     OldValueCache(Box<dyn FnOnce(&OldValueCache) + Send>),
+    InitializeStats(Box<dyn FnOnce(InitializeStats) + Send>),
 }
 
 pub enum Task {
@@ -271,6 +288,7 @@ impl fmt::Debug for Task {
             Task::Validate(validate) => match validate {
                 Validate::Region(region_id, _) => de.field("region_id", &region_id).finish(),
                 Validate::OldValueCache(_) => de.finish(),
+                Validate::InitializeStats(_) => de.finish(),
             },
             Task::ChangeConfig(change) => de
                 .field("type", &"change_config")
@@ -362,15 +380,17 @@ pub struct Endpoint<T, E, S> {
 
     raftstore_v2: bool,
     config: CdcConfig,
+    resolved_ts_config: ResolvedTsConfig,
     api_version: ApiVersion,
 
     // Incremental scan
     workers: Runtime,
     scan_concurrency_semaphore: Arc<Semaphore>,
     scan_speed_limiter: Limiter,
+    fetch_speed_limiter: Limiter,
     max_scan_batch_bytes: usize,
     max_scan_batch_size: usize,
-    sink_memory_quota: MemoryQuota,
+    sink_memory_quota: Arc<MemoryQuota>,
 
     old_value_cache: OldValueCache,
     resolved_region_heap: RefCell<ResolvedRegionHeap>,
@@ -384,12 +404,16 @@ pub struct Endpoint<T, E, S> {
     resolved_region_count: usize,
     unresolved_region_count: usize,
     warn_resolved_ts_repeat_count: usize,
+
+    // Validate statistics of the next incremental scan. Only for tests.
+    validate_next_initialize_stats: Option<Box<dyn FnOnce(InitializeStats) + Send>>,
 }
 
 impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, S> {
     pub fn new(
         cluster_id: u64,
         config: &CdcConfig,
+        resolved_ts_config: &ResolvedTsConfig,
         raftstore_v2: bool,
         api_version: ApiVersion,
         pd_client: Arc<dyn PdClient>,
@@ -401,7 +425,7 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
         concurrency_manager: ConcurrencyManager,
         env: Arc<Environment>,
         security_mgr: Arc<SecurityManager>,
-        sink_memory_quota: MemoryQuota,
+        sink_memory_quota: Arc<MemoryQuota>,
         causal_ts_provider: Option<Arc<CausalTsProviderImpl>>,
     ) -> Endpoint<T, E, S> {
         let workers = Builder::new_multi_thread()
@@ -423,8 +447,13 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
         let scan_concurrency_semaphore =
             Arc::new(Semaphore::new(config.incremental_scan_concurrency));
         let old_value_cache = OldValueCache::new(config.old_value_cache_memory_quota);
-        let speed_limiter = Limiter::new(if config.incremental_scan_speed_limit.0 > 0 {
+        let scan_speed_limiter = Limiter::new(if config.incremental_scan_speed_limit.0 > 0 {
             config.incremental_scan_speed_limit.0 as f64
+        } else {
+            f64::INFINITY
+        });
+        let fetch_speed_limiter = Limiter::new(if config.incremental_fetch_speed_limit.0 > 0 {
+            config.incremental_fetch_speed_limit.0 as f64
         } else {
             f64::INFINITY
         });
@@ -453,10 +482,12 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
             pd_client,
             tso_worker,
             timer: SteadyTimer::default(),
-            scan_speed_limiter: speed_limiter,
+            scan_speed_limiter,
+            fetch_speed_limiter,
             max_scan_batch_bytes,
             max_scan_batch_size,
             config: config.clone(),
+            resolved_ts_config: resolved_ts_config.clone(),
             raftstore_v2,
             api_version,
             workers,
@@ -479,6 +510,8 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
             warn_resolved_ts_repeat_count: WARN_RESOLVED_TS_COUNT_THRESHOLD,
             current_ts: TimeStamp::zero(),
             causal_ts_provider,
+
+            validate_next_initialize_stats: None,
         };
         ep.register_min_ts_event(leader_resolver, Instant::now());
         ep
@@ -534,6 +567,15 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
 
             self.scan_speed_limiter.set_speed_limit(new_speed_limit);
         }
+        if change.get("incremental_fetch_speed_limit").is_some() {
+            let new_speed_limit = if self.config.incremental_fetch_speed_limit.0 > 0 {
+                self.config.incremental_fetch_speed_limit.0 as f64
+            } else {
+                f64::INFINITY
+            };
+
+            self.fetch_speed_limiter.set_speed_limit(new_speed_limit);
+        }
     }
 
     pub fn set_max_scan_batch_size(&mut self, max_scan_batch_size: usize) {
@@ -582,8 +624,20 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
                 request_id,
             } => {
                 let conn = self.connections.get_mut(&conn_id).unwrap();
-                for (region, downstream) in conn.unsubscribe_request(request_id) {
-                    self.deregister_downstream(region, downstream, None);
+                for (region_id, downstream) in conn.unsubscribe_request(request_id) {
+                    let err = Some(Error::Other("region not found".into()));
+                    self.deregister_downstream(region_id, downstream, err);
+                }
+            }
+            Deregister::Region {
+                conn_id,
+                request_id,
+                region_id,
+            } => {
+                let conn = self.connections.get_mut(&conn_id).unwrap();
+                if let Some(downstream) = conn.unsubscribe(request_id, region_id) {
+                    let err = Some(Error::Other("region not found".into()));
+                    self.deregister_downstream(region_id, downstream, err);
                 }
             }
             Deregister::Downstream {
@@ -647,8 +701,20 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
         let downstream_id = downstream.get_id();
         let downstream_state = downstream.get_state();
 
-        // Register must follow OpenConn, so the connection must be available.
-        let conn = self.connections.get_mut(&conn_id).unwrap();
+        // The connection can be deregistered by some internal errors. Clients will
+        // be always notified by closing the GRPC server stream, so it's OK to drop
+        // the task directly.
+        let conn = match self.connections.get_mut(&conn_id) {
+            Some(conn) => conn,
+            None => {
+                info!("cdc register region on an deregistered connection, ignore";
+                    "region_id" => region_id,
+                    "conn_id" => ?conn_id,
+                    "req_id" => request_id,
+                    "downstream_id" => ?downstream_id);
+                return;
+            }
+        };
         downstream.set_sink(conn.get_sink().clone());
 
         // Check if the cluster id matches if supported.
@@ -681,7 +747,9 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
             Some(reader) => reader.txn_extra_op.clone(),
             None => {
                 error!("cdc register for a not found region"; "region_id" => region_id);
-                let _ = downstream.sink_region_not_found(region_id);
+                let mut err_event = EventError::default();
+                err_event.mut_region_not_found().region_id = region_id;
+                let _ = downstream.sink_error_event(region_id, err_event);
                 return;
             }
         };
@@ -708,7 +776,11 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
             HashMapEntry::Occupied(e) => e.into_mut(),
             HashMapEntry::Vacant(e) => {
                 is_new_delegate = true;
-                e.insert(Delegate::new(region_id, txn_extra_op))
+                e.insert(Delegate::new(
+                    region_id,
+                    txn_extra_op,
+                    self.sink_memory_quota.clone(),
+                ))
             }
         };
 
@@ -750,6 +822,7 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
         let change_cmd = ChangeObserver::from_cdc(region_id, delegate.handle.clone());
         let observed_range = downstream_.observed_range;
         let region_epoch = request.take_region_epoch();
+        let scan_truncated = downstream_.scan_truncated;
         let mut init = Initializer {
             tablet: self.tablets.get(region_id).map(|t| t.into_owned()),
             sched,
@@ -761,7 +834,9 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
             sink: conn.get_sink().clone(),
             request_id: request.get_request_id(),
             downstream_state,
-            speed_limiter: self.scan_speed_limiter.clone(),
+            scan_truncated,
+            scan_speed_limiter: self.scan_speed_limiter.clone(),
+            fetch_speed_limiter: self.fetch_speed_limiter.clone(),
             max_scan_batch_bytes: self.max_scan_batch_bytes,
             max_scan_batch_size: self.max_scan_batch_size,
             observe_id,
@@ -774,14 +849,19 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
 
         let cdc_handle = self.cdc_handle.clone();
         let concurrency_semaphore = self.scan_concurrency_semaphore.clone();
+        let memory_quota = self.sink_memory_quota.clone();
+        let validate_initialize_stats = self.validate_next_initialize_stats.take();
         self.workers.spawn(async move {
             CDC_SCAN_TASKS.with_label_values(&["total"]).inc();
             match init
-                .initialize(change_cmd, cdc_handle, concurrency_semaphore)
+                .initialize(change_cmd, cdc_handle, concurrency_semaphore, memory_quota)
                 .await
             {
-                Ok(()) => {
+                Ok(stats) => {
                     CDC_SCAN_TASKS.with_label_values(&["finish"]).inc();
+                    if let Some(validate) = validate_initialize_stats {
+                        validate(stats);
+                    }
                 }
                 Err(e) => {
                     CDC_SCAN_TASKS.with_label_values(&["abort"]).inc();
@@ -830,33 +910,43 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
 
     fn on_region_ready(&mut self, observe_id: ObserveId, resolver: Resolver, region: Region) {
         let region_id = region.get_id();
-        let mut failed_downstreams = Vec::new();
-        if let Some(delegate) = self.capture_regions.get_mut(&region_id) {
-            if delegate.handle.id == observe_id {
-                let region_id = delegate.region_id;
-                for (downstream, e) in delegate.on_region_ready(resolver, region) {
-                    failed_downstreams.push(Deregister::Downstream {
-                        conn_id: downstream.get_conn_id(),
-                        request_id: downstream.get_req_id(),
-                        region_id,
-                        downstream_id: downstream.get_id(),
-                        err: Some(e),
-                    });
-                }
-            } else {
-                debug!("cdc stale region ready";
-                    "region_id" => region.get_id(),
-                    "observe_id" => ?observe_id,
-                    "current_id" => ?delegate.handle.id);
+        match self.capture_regions.get_mut(&region_id) {
+            None => {
+                debug!("cdc region not found on region ready (finish building resolver)";
+                    "region_id" => region.get_id());
             }
-        } else {
-            debug!("cdc region not found on region ready (finish building resolver)";
-                "region_id" => region.get_id());
-        }
-
-        // Deregister downstreams if there is any downstream fails to subscribe.
-        for deregister in failed_downstreams {
-            self.on_deregister(deregister);
+            Some(delegate) => {
+                if delegate.handle.id != observe_id {
+                    debug!("cdc stale region ready";
+                        "region_id" => region.get_id(),
+                        "observe_id" => ?observe_id,
+                        "current_id" => ?delegate.handle.id);
+                    return;
+                }
+                match delegate.on_region_ready(resolver, region) {
+                    Ok(fails) => {
+                        let mut deregisters = Vec::new();
+                        for (downstream, e) in fails {
+                            deregisters.push(Deregister::Downstream {
+                                conn_id: downstream.get_conn_id(),
+                                request_id: downstream.get_req_id(),
+                                region_id,
+                                downstream_id: downstream.get_id(),
+                                err: Some(e),
+                            });
+                        }
+                        // Deregister downstreams if there is any downstream fails to subscribe.
+                        for deregister in deregisters {
+                            self.on_deregister(deregister);
+                        }
+                    }
+                    Err(e) => self.on_deregister(Deregister::Delegate {
+                        region_id,
+                        observe_id,
+                        err: e,
+                    }),
+                }
+            }
         }
     }
 
@@ -1060,6 +1150,7 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
         let causal_ts_provider = self.causal_ts_provider.clone();
         // We use channel to deliver leader_resolver in async block.
         let (leader_resolver_tx, leader_resolver_rx) = bounded(1);
+        let advance_ts_interval = self.resolved_ts_config.advance_ts_interval.0;
 
         let fut = async move {
             let _ = timeout.compat().await;
@@ -1099,7 +1190,7 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
                         Ok(_) | Err(ScheduleError::Stopped(_)) => (),
                         // Must schedule `RegisterMinTsEvent` event otherwise resolved ts can not
                         // advance normally.
-                        Err(err) => panic!("failed to regiester min ts event, error: {:?}", err),
+                        Err(err) => panic!("failed to register min ts event, error: {:?}", err),
                     }
                 } else {
                     // During shutdown, tso runtime drops future immediately,
@@ -1114,7 +1205,9 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta> Endpoint<T, E, 
             let regions =
                 if hibernate_regions_compatible && gate.can_enable(FEATURE_RESOLVED_TS_STORE) {
                     CDC_RESOLVED_TS_ADVANCE_METHOD.set(1);
-                    leader_resolver.resolve(regions, min_ts).await
+                    leader_resolver
+                        .resolve(regions, min_ts, Some(advance_ts_interval))
+                        .await
                 } else {
                     CDC_RESOLVED_TS_ADVANCE_METHOD.set(0);
                     resolve_by_raft(regions, min_ts, cdc_handle).await
@@ -1237,6 +1330,9 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta + Send> Runnable
                 Validate::OldValueCache(validate) => {
                     validate(&self.old_value_cache);
                 }
+                Validate::InitializeStats(validate) => {
+                    self.validate_next_initialize_stats = Some(validate);
+                }
             },
             Task::ChangeConfig(change) => self.on_change_cfg(change),
         }
@@ -1247,13 +1343,12 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta + Send> Runnable
     for Endpoint<T, E, S>
 {
     fn on_timeout(&mut self) {
-        CDC_ENDPOINT_PENDING_TASKS.set(self.scheduler.pending_tasks() as _);
-
         // Reclaim resolved_region_heap memory.
         self.resolved_region_heap
             .borrow_mut()
             .reset_and_shrink_to(self.capture_regions.len());
 
+        CDC_ENDPOINT_PENDING_TASKS.set(self.scheduler.pending_tasks() as _);
         CDC_CAPTURED_REGION_COUNT.set(self.capture_regions.len() as i64);
         CDC_REGION_RESOLVE_STATUS_GAUGE_VEC
             .with_label_values(&["unresolved"])
@@ -1261,6 +1356,7 @@ impl<T: 'static + CdcHandle<E>, E: KvEngine, S: StoreRegionMeta + Send> Runnable
         CDC_REGION_RESOLVE_STATUS_GAUGE_VEC
             .with_label_values(&["resolved"])
             .set(self.resolved_region_count as _);
+
         if self.min_resolved_ts != TimeStamp::max() {
             CDC_MIN_RESOLVED_TS_REGION.set(self.min_ts_region_id as i64);
             CDC_MIN_RESOLVED_TS.set(self.min_resolved_ts.physical() as i64);
@@ -1438,6 +1534,7 @@ mod tests {
         let ep = Endpoint::new(
             DEFAULT_CLUSTER_ID,
             cfg,
+            &ResolvedTsConfig::default(),
             false,
             api_version,
             pd_client,
@@ -1455,7 +1552,7 @@ mod tests {
             ConcurrencyManager::new(1.into()),
             env,
             security_mgr,
-            MemoryQuota::new(usize::MAX),
+            Arc::new(MemoryQuota::new(usize::MAX)),
             causal_ts_provider,
         );
 
@@ -1476,11 +1573,11 @@ mod tests {
 
         let mut suite = mock_endpoint(&cfg, None, ApiVersion::V1);
         suite.add_region(1, 100);
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
-        let (tx, mut rx) = channel::channel(1, quota);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (tx, mut rx) = channel::channel(ConnId::default(), 1, quota);
         let mut rx = rx.drain();
 
-        let conn = Conn::new(tx, String::new());
+        let conn = Conn::new(ConnId::default(), tx, String::new());
         let conn_id = conn.get_id();
         suite.run(Task::OpenConn { conn });
         suite.run(set_conn_verion_task(
@@ -1728,19 +1825,46 @@ mod tests {
                     < f64::EPSILON
             );
         }
+
+        // Modify incremental_fetch_speed_limit.
+        {
+            let mut updated_cfg = cfg.clone();
+            {
+                updated_cfg.incremental_fetch_speed_limit = ReadableSize::mb(2048);
+            }
+            let diff = cfg.diff(&updated_cfg);
+
+            assert_eq!(
+                ep.config.incremental_fetch_speed_limit,
+                ReadableSize::mb(512)
+            );
+            assert!(
+                (ep.fetch_speed_limiter.speed_limit() - ReadableSize::mb(512).0 as f64).abs()
+                    < f64::EPSILON
+            );
+            ep.run(Task::ChangeConfig(diff));
+            assert_eq!(
+                ep.config.incremental_fetch_speed_limit,
+                ReadableSize::mb(2048)
+            );
+            assert!(
+                (ep.fetch_speed_limiter.speed_limit() - ReadableSize::mb(2048).0 as f64).abs()
+                    < f64::EPSILON
+            );
+        }
     }
 
     #[test]
     fn test_raftstore_is_busy() {
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
-        let (tx, _rx) = channel::channel(1, quota);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (tx, _rx) = channel::channel(ConnId::default(), 1, quota);
         let mut suite = mock_endpoint(&CdcConfig::default(), None, ApiVersion::V1);
 
         // Fill the channel.
         suite.add_region(1 /* region id */, 1 /* cap */);
         suite.fill_raft_rx(1);
 
-        let conn = Conn::new(tx, String::new());
+        let conn = Conn::new(ConnId::default(), tx, String::new());
         let conn_id = conn.get_id();
         suite.run(Task::OpenConn { conn });
         suite.run(set_conn_verion_task(conn_id, semver::Version::new(0, 0, 0)));
@@ -1785,11 +1909,11 @@ mod tests {
         };
         let mut suite = mock_endpoint(&cfg, None, ApiVersion::V1);
         suite.add_region(1, 100);
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
-        let (tx, mut rx) = channel::channel(1, quota);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (tx, mut rx) = channel::channel(ConnId::default(), 1, quota);
         let mut rx = rx.drain();
 
-        let conn = Conn::new(tx, String::new());
+        let conn = Conn::new(ConnId::default(), tx, String::new());
         let conn_id = conn.get_id();
         suite.run(Task::OpenConn { conn });
 
@@ -1966,12 +2090,12 @@ mod tests {
         let mut suite = mock_endpoint(&cfg, None, ApiVersion::V1);
         suite.add_region(1, 100);
 
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
-        let (tx, mut rx) = channel::channel(1, quota);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (tx, mut rx) = channel::channel(ConnId::default(), 1, quota);
         let mut rx = rx.drain();
         let mut region = Region::default();
         region.set_id(1);
-        let conn = Conn::new(tx, String::new());
+        let conn = Conn::new(ConnId::default(), tx, String::new());
         let conn_id = conn.get_id();
         suite.run(Task::OpenConn { conn });
 
@@ -1999,7 +2123,8 @@ mod tests {
             downstream,
             conn_id,
         });
-        let resolver = Resolver::new(1);
+        let memory_quota = Arc::new(MemoryQuota::new(std::usize::MAX));
+        let resolver = Resolver::new(1, memory_quota);
         let observe_id = suite.endpoint.capture_regions[&1].handle.id;
         suite.on_region_ready(observe_id, resolver, region.clone());
         suite.run(Task::MinTs {
@@ -2035,7 +2160,8 @@ mod tests {
             downstream,
             conn_id,
         });
-        let resolver = Resolver::new(2);
+        let memory_quota = Arc::new(MemoryQuota::new(std::usize::MAX));
+        let resolver = Resolver::new(2, memory_quota);
         region.set_id(2);
         let observe_id = suite.endpoint.capture_regions[&2].handle.id;
         suite.on_region_ready(observe_id, resolver, region);
@@ -2056,12 +2182,12 @@ mod tests {
         }
 
         // Register region 3 to another conn which is not support batch resolved ts.
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
-        let (tx, mut rx2) = channel::channel(1, quota);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (tx, mut rx2) = channel::channel(ConnId::default(), 1, quota);
         let mut rx2 = rx2.drain();
         let mut region = Region::default();
         region.set_id(3);
-        let conn = Conn::new(tx, String::new());
+        let conn = Conn::new(ConnId::default(), tx, String::new());
         let conn_id = conn.get_id();
         suite.run(Task::OpenConn { conn });
         suite.run(set_conn_verion_task(conn_id, semver::Version::new(4, 0, 5)));
@@ -2084,7 +2210,8 @@ mod tests {
             downstream,
             conn_id,
         });
-        let resolver = Resolver::new(3);
+        let memory_quota = Arc::new(MemoryQuota::new(std::usize::MAX));
+        let resolver = Resolver::new(3, memory_quota);
         region.set_id(3);
         let observe_id = suite.endpoint.capture_regions[&3].handle.id;
         suite.on_region_ready(observe_id, resolver, region);
@@ -2127,11 +2254,11 @@ mod tests {
     fn test_deregister() {
         let mut suite = mock_endpoint(&CdcConfig::default(), None, ApiVersion::V1);
         suite.add_region(1, 100);
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
-        let (tx, mut rx) = channel::channel(1, quota);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (tx, mut rx) = channel::channel(ConnId::default(), 1, quota);
         let mut rx = rx.drain();
 
-        let conn = Conn::new(tx, String::new());
+        let conn = Conn::new(ConnId::default(), tx, String::new());
         let conn_id = conn.get_id();
         suite.run(Task::OpenConn { conn });
         suite.run(set_conn_verion_task(conn_id, semver::Version::new(0, 0, 0)));
@@ -2279,12 +2406,12 @@ mod tests {
         // Open two connections a and b, registers region 1, 2 to conn a and
         // region 3 to conn b.
         let mut conn_rxs = vec![];
-        let quota = channel::MemoryQuota::new(usize::MAX);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
         for region_ids in vec![vec![1, 2], vec![3]] {
-            let (tx, rx) = channel::channel(1, quota.clone());
+            let conn_id = ConnId::default();
+            let (tx, rx) = channel::channel(conn_id, 1, quota.clone());
             conn_rxs.push(rx);
-            let conn = Conn::new(tx, String::new());
-            let conn_id = conn.get_id();
+            let conn = Conn::new(conn_id, tx, String::new());
             suite.run(Task::OpenConn { conn });
             let version = FeatureGate::batch_resolved_ts();
             suite.run(set_conn_verion_task(conn_id, version));
@@ -2311,7 +2438,8 @@ mod tests {
                     downstream,
                     conn_id,
                 });
-                let resolver = Resolver::new(region_id);
+                let memory_quota = Arc::new(MemoryQuota::new(std::usize::MAX));
+                let resolver = Resolver::new(region_id, memory_quota);
                 let observe_id = suite.endpoint.capture_regions[&region_id].handle.id;
                 let mut region = Region::default();
                 region.set_id(region_id);
@@ -2392,11 +2520,11 @@ mod tests {
     fn test_deregister_conn_then_delegate() {
         let mut suite = mock_endpoint(&CdcConfig::default(), None, ApiVersion::V1);
         suite.add_region(1, 100);
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
 
         // Open conn a
-        let (tx1, _rx1) = channel::channel(1, quota.clone());
-        let conn_a = Conn::new(tx1, String::new());
+        let (tx1, _rx1) = channel::channel(ConnId::default(), 1, quota.clone());
+        let conn_a = Conn::new(ConnId::default(), tx1, String::new());
         let conn_id_a = conn_a.get_id();
         suite.run(Task::OpenConn { conn: conn_a });
         suite.run(set_conn_verion_task(
@@ -2405,9 +2533,9 @@ mod tests {
         ));
 
         // Open conn b
-        let (tx2, mut rx2) = channel::channel(1, quota);
+        let (tx2, mut rx2) = channel::channel(ConnId::default(), 1, quota);
         let mut rx2 = rx2.drain();
-        let conn_b = Conn::new(tx2, String::new());
+        let conn_b = Conn::new(ConnId::default(), tx2, String::new());
         let conn_id_b = conn_b.get_id();
         suite.run(Task::OpenConn { conn: conn_b });
         suite.run(set_conn_verion_task(
@@ -2470,10 +2598,11 @@ mod tests {
         let mut region = Region::default();
         region.id = 1;
         region.set_region_epoch(region_epoch_2);
+        let memory_quota = Arc::new(MemoryQuota::new(std::usize::MAX));
         suite.run(Task::ResolverReady {
             observe_id,
             region: region.clone(),
-            resolver: Resolver::new(1),
+            resolver: Resolver::new(1, memory_quota),
         });
 
         // Deregister deletgate due to epoch not match for conn b.
@@ -2557,11 +2686,11 @@ mod tests {
             ..Default::default()
         };
         let mut suite = mock_endpoint(&cfg, None, ApiVersion::V1);
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
-        let (tx, mut rx) = channel::channel(1, quota);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (tx, mut rx) = channel::channel(ConnId::default(), 1, quota);
         let mut rx = rx.drain();
 
-        let conn = Conn::new(tx, String::new());
+        let conn = Conn::new(ConnId::default(), tx, String::new());
         let conn_id = conn.get_id();
         suite.run(Task::OpenConn { conn });
         // Enable batch resolved ts in the test.
@@ -2596,8 +2725,11 @@ mod tests {
                 conn_id,
             });
 
-            let mut resolver = Resolver::new(id);
-            resolver.track_lock(TimeStamp::compose(0, id), vec![], None);
+            let memory_quota = Arc::new(MemoryQuota::new(std::usize::MAX));
+            let mut resolver = Resolver::new(id, memory_quota);
+            resolver
+                .track_lock(TimeStamp::compose(0, id), vec![], None)
+                .unwrap();
             let mut region = Region::default();
             region.id = id;
             region.set_region_epoch(region_epoch);
@@ -2605,7 +2737,8 @@ mod tests {
                 .capture_regions
                 .get_mut(&id)
                 .unwrap()
-                .on_region_ready(resolver, region);
+                .on_region_ready(resolver, region)
+                .unwrap();
             assert!(failed.is_empty());
         }
         suite
@@ -2646,11 +2779,11 @@ mod tests {
         };
         let mut suite = mock_endpoint(&cfg, None, ApiVersion::V1);
         suite.add_region(1, 100);
-        let quota = crate::channel::MemoryQuota::new(usize::MAX);
-        let (tx, mut rx) = channel::channel(1, quota);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (tx, mut rx) = channel::channel(ConnId::default(), 1, quota);
         let mut rx = rx.drain();
 
-        let conn = Conn::new(tx, String::new());
+        let conn = Conn::new(ConnId::default(), tx, String::new());
         let conn_id = conn.get_id();
         suite.run(Task::OpenConn { conn });
 
@@ -2834,5 +2967,106 @@ mod tests {
         }));
         assert_eq!(suite.connections[&conn_id].downstreams_count(), 0);
         assert_eq!(suite.capture_regions.len(), 0);
+        for _ in 0..2 {
+            let cdc_event = channel::recv_timeout(&mut rx, Duration::from_millis(500))
+                .unwrap()
+                .unwrap();
+            let check = matches!(cdc_event.0, CdcEvent::Event(e) if {
+                matches!(e.event, Some(Event_oneof_event::Error(ref err)) if {
+                    err.has_region_not_found()
+                })
+            });
+            assert!(check);
+        }
+
+        // Resubscribe the region.
+        suite.add_region(2, 100);
+        for i in 1..=2 {
+            req.set_request_id(1);
+            req.set_region_id(i);
+            let downstream = Downstream::new(
+                "".to_string(),
+                region_epoch.clone(),
+                1,
+                conn_id,
+                ChangeDataRequestKvApi::TiDb,
+                false,
+                ObservedRange::default(),
+            );
+            suite.run(Task::Register {
+                request: req.clone(),
+                downstream,
+                conn_id,
+            });
+            assert_eq!(suite.connections[&conn_id].downstreams_count(), i as usize);
+        }
+
+        // Deregister regions one by one in the request.
+        suite.run(Task::Deregister(Deregister::Region {
+            conn_id,
+            request_id: 1,
+            region_id: 1,
+        }));
+        assert_eq!(suite.connections[&conn_id].downstreams_count(), 1);
+        assert_eq!(suite.capture_regions.len(), 1);
+
+        suite.run(Task::Deregister(Deregister::Region {
+            conn_id,
+            request_id: 1,
+            region_id: 2,
+        }));
+        assert_eq!(suite.connections[&conn_id].downstreams_count(), 0);
+        assert_eq!(suite.capture_regions.len(), 0);
+
+        for _ in 0..2 {
+            let cdc_event = channel::recv_timeout(&mut rx, Duration::from_millis(500))
+                .unwrap()
+                .unwrap();
+            let check = matches!(cdc_event.0, CdcEvent::Event(e) if {
+                matches!(e.event, Some(Event_oneof_event::Error(ref err)) if {
+                    err.has_region_not_found()
+                })
+            });
+            assert!(check);
+        }
+    }
+
+    #[test]
+    fn test_register_after_connection_deregistered() {
+        let cfg = CdcConfig {
+            min_ts_interval: ReadableDuration(Duration::from_secs(60)),
+            ..Default::default()
+        };
+        let mut suite = mock_endpoint(&cfg, None, ApiVersion::V1);
+        suite.add_region(1, 100);
+        let quota = Arc::new(MemoryQuota::new(usize::MAX));
+        let (tx, _rx) = channel::channel(ConnId::default(), 1, quota);
+
+        let conn = Conn::new(ConnId::default(), tx, String::new());
+        let conn_id = conn.get_id();
+        suite.run(Task::OpenConn { conn });
+
+        suite.run(Task::Deregister(Deregister::Conn(conn_id)));
+
+        let mut req = ChangeDataRequest::default();
+
+        req.set_region_id(1);
+        req.set_request_id(1);
+        let region_epoch = req.get_region_epoch().clone();
+        let downstream = Downstream::new(
+            "".to_string(),
+            region_epoch,
+            1,
+            conn_id,
+            ChangeDataRequestKvApi::TiDb,
+            false,
+            ObservedRange::default(),
+        );
+        suite.run(Task::Register {
+            request: req,
+            downstream,
+            conn_id,
+        });
+        assert!(suite.connections.is_empty());
     }
 }

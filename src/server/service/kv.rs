@@ -202,7 +202,7 @@ macro_rules! handle_request {
                 resource_manager.consume_penalty(resource_control_ctx);
             }
             GRPC_RESOURCE_GROUP_COUNTER_VEC
-                    .with_label_values(&[resource_control_ctx.get_resource_group_name()])
+                    .with_label_values(&[resource_control_ctx.get_resource_group_name(), resource_control_ctx.get_resource_group_name()])
                     .inc();
             let resp = $future_name(&self.storage, req);
             let task = async move {
@@ -484,7 +484,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             resource_manager.consume_penalty(resource_control_ctx);
         }
         GRPC_RESOURCE_GROUP_COUNTER_VEC
-            .with_label_values(&[resource_control_ctx.get_resource_group_name()])
+            .with_label_values(&[
+                resource_control_ctx.get_resource_group_name(),
+                resource_control_ctx.get_resource_group_name(),
+            ])
             .inc();
 
         let begin_instant = Instant::now();
@@ -522,7 +525,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             resource_manager.consume_penalty(resource_control_ctx);
         }
         GRPC_RESOURCE_GROUP_COUNTER_VEC
-            .with_label_values(&[resource_control_ctx.get_resource_group_name()])
+            .with_label_values(&[
+                resource_control_ctx.get_resource_group_name(),
+                resource_control_ctx.get_resource_group_name(),
+            ])
             .inc();
 
         let begin_instant = Instant::now();
@@ -611,7 +617,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
             resource_manager.consume_penalty(resource_control_ctx);
         }
         GRPC_RESOURCE_GROUP_COUNTER_VEC
-            .with_label_values(&[resource_control_ctx.get_resource_group_name()])
+            .with_label_values(&[
+                resource_control_ctx.get_resource_group_name(),
+                resource_control_ctx.get_resource_group_name(),
+            ])
             .inc();
 
         let mut stream = self
@@ -1155,7 +1164,7 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
                         resource_manager.consume_penalty(resource_control_ctx);
                     }
                     GRPC_RESOURCE_GROUP_COUNTER_VEC
-                        .with_label_values(&[resource_control_ctx.get_resource_group_name()])
+                        .with_label_values(&[resource_control_ctx.get_resource_group_name(), resource_control_ctx.get_resource_group_name()])
                         .inc();
                     if batcher.as_mut().map_or(false, |req_batch| {
                         req_batch.can_batch_get(&req)
@@ -1176,8 +1185,8 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
                         resource_manager.consume_penalty(resource_control_ctx);
                     }
                     GRPC_RESOURCE_GROUP_COUNTER_VEC
-                    .with_label_values(&[resource_control_ctx.get_resource_group_name()])
-                    .inc();
+                        .with_label_values(&[resource_control_ctx.get_resource_group_name(), resource_control_ctx.get_resource_group_name()])
+                        .inc();
                     if batcher.as_mut().map_or(false, |req_batch| {
                         req_batch.can_batch_raw_get(&req)
                     }) {
@@ -1191,16 +1200,16 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
                         response_batch_commands_request(id, resp, tx.clone(), begin_instant, GrpcTypeKind::raw_get, source);
                     }
                 },
-                Some(batch_commands_request::request::Cmd::Coprocessor(mut req)) => {
+                Some(batch_commands_request::request::Cmd::Coprocessor(req)) => {
                     let resource_control_ctx = req.get_context().get_resource_control_context();
                     if let Some(resource_manager) = resource_manager {
                         resource_manager.consume_penalty(resource_control_ctx);
                     }
                     GRPC_RESOURCE_GROUP_COUNTER_VEC
-                        .with_label_values(&[resource_control_ctx.get_resource_group_name()])
+                        .with_label_values(&[resource_control_ctx.get_resource_group_name(), resource_control_ctx.get_resource_group_name()])
                         .inc();
                     let begin_instant = Instant::now();
-                    let source = req.mut_context().take_request_source();
+                    let source = req.get_context().get_request_source().to_owned();
                     let resp = future_copr(copr, Some(peer.to_string()), req)
                         .map_ok(|resp| {
                             resp.map(oneof!(batch_commands_response::response::Cmd::Coprocessor))
@@ -1225,16 +1234,16 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
                         String::default(),
                     );
                 }
-                $(Some(batch_commands_request::request::Cmd::$cmd(mut req)) => {
+                $(Some(batch_commands_request::request::Cmd::$cmd(req)) => {
                     let resource_control_ctx = req.get_context().get_resource_control_context();
                     if let Some(resource_manager) = resource_manager {
                         resource_manager.consume_penalty(resource_control_ctx);
                     }
                     GRPC_RESOURCE_GROUP_COUNTER_VEC
-                        .with_label_values(&[resource_control_ctx.get_resource_group_name()])
+                        .with_label_values(&[resource_control_ctx.get_resource_group_name(), resource_control_ctx.get_resource_group_name()])
                         .inc();
                     let begin_instant = Instant::now();
-                    let source = req.mut_context().take_request_source();
+                    let source = req.get_context().get_request_source().to_owned();
                     let resp = $future_fn($($arg,)* req)
                         .map_ok(oneof!(batch_commands_response::response::Cmd::$cmd))
                         .map_err(|_| GRPC_MSG_FAIL_COUNTER.$metric_name.inc());

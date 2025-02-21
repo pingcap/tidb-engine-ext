@@ -159,7 +159,9 @@ fn test_delete_files_in_range_for_titan() {
     cfg.rocksdb.defaultcf.titan.min_gc_batch_size = ReadableSize(0);
     cfg.rocksdb.defaultcf.titan.discardable_ratio = 0.4;
     cfg.rocksdb.defaultcf.titan.min_blob_size = ReadableSize(0);
-    let resource = cfg.rocksdb.build_resources(Default::default());
+    let resource = cfg
+        .rocksdb
+        .build_resources(Default::default(), cfg.storage.engine);
     let kv_db_opts = cfg.rocksdb.build_opt(&resource, cfg.storage.engine);
     let kv_cfs_opts = cfg.rocksdb.build_cf_opts(
         &cfg.rocksdb.build_cf_resources(cache),
@@ -374,6 +376,7 @@ fn test_delete_files_in_range_for_titan() {
         b"{",
         u64::MAX,
         &limiter,
+        None,
     )
     .unwrap();
     let mut cf_file_write = CfFile::new(
@@ -390,6 +393,7 @@ fn test_delete_files_in_range_for_titan() {
         b"{",
         u64::MAX,
         &limiter,
+        None,
     )
     .unwrap();
 

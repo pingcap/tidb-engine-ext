@@ -104,12 +104,11 @@ pub struct Config {
     pub max_manual_flush_rate: f64,
     // When a peer is not responding for this time, leader will not keep entry cache for it.
     pub raft_entry_cache_life_time: ReadableDuration,
-    // Deprecated! The configuration has no effect.
-    // They are preserved for compatibility check.
     // When a peer is newly added, reject transferring leader to the peer for a while.
     #[doc(hidden)]
     #[serde(skip_serializing)]
-    #[online_config(skip)]
+    #[online_config(hidden)]
+    #[deprecated = "The configuration has been removed. It has no effect"]
     pub raft_reject_transfer_leader_duration: ReadableDuration,
 
     /// Whether to disable checking quorum for the raft group. This will make
@@ -140,7 +139,7 @@ pub struct Config {
     pub region_compact_min_redundant_rows: u64,
     /// Minimum percentage of redundant rows to trigger manual compaction.
     /// Should between 1 and 100.
-    pub region_compact_redundant_rows_percent: u64,
+    pub region_compact_redundant_rows_percent: Option<u64>,
     pub pd_heartbeat_tick_interval: ReadableDuration,
     pub pd_store_heartbeat_tick_interval: ReadableDuration,
     pub snap_mgr_gc_tick_interval: ReadableDuration,
@@ -169,6 +168,9 @@ pub struct Config {
     /// and try to alert monitoring systems, if there is any.
     pub abnormal_leader_missing_duration: ReadableDuration,
     pub peer_stale_state_check_interval: ReadableDuration,
+    /// Interval to check GC peers.
+    #[doc(hidden)]
+    pub gc_peer_check_interval: ReadableDuration,
 
     #[online_config(hidden)]
     pub leader_transfer_max_log_lag: u64,
@@ -317,34 +319,47 @@ pub struct Config {
     pub io_reschedule_concurrent_max_count: usize,
     pub io_reschedule_hotpot_duration: ReadableDuration,
 
-    // Deprecated! Batch is done in raft client.
     #[doc(hidden)]
     #[serde(skip_serializing)]
-    #[online_config(skip)]
+    #[online_config(hidden)]
+    #[deprecated = "The configuration has been removed. Batch is done in raft client."]
     pub raft_msg_flush_interval: ReadableDuration,
 
-    // Deprecated! These configuration has been moved to Coprocessor.
-    // They are preserved for compatibility check.
     #[doc(hidden)]
     #[serde(skip_serializing)]
-    #[online_config(skip)]
+    #[online_config(hidden)]
+    #[deprecated = "The configuration has been moved to coprocessor.region_max_size."]
     pub region_max_size: ReadableSize,
     #[doc(hidden)]
     #[serde(skip_serializing)]
-    #[online_config(skip)]
+    #[online_config(hidden)]
+    #[deprecated = "The configuration has been moved to coprocessor.region_split_size."]
     pub region_split_size: ReadableSize,
-    // Deprecated! The time to clean stale peer safely can be decided based on RocksDB snapshot
-    // sequence number.
     #[doc(hidden)]
     #[serde(skip_serializing)]
-    #[online_config(skip)]
+    #[online_config(hidden)]
+    #[deprecated = "The configuration has been removed. The time to clean stale peer safely can be decided based on RocksDB snapshot sequence number."]
     pub clean_stale_peer_delay: ReadableDuration,
 
-    // Interval to inspect the latency of raftstore for slow store detection.
+    #[online_config(hidden)]
+    // Interval to inspect the latency of flushing raft logs for slow store detection.
     pub inspect_interval: ReadableDuration,
-
+    // Interval to inspect the latency of flushes on kvdb for slow store detection.
+    // If the kvdb uses the same mount path with raftdb, the default value will be
+    // optimized to `0` to avoid duplicated inspection.
+    #[doc(hidden)]
+    #[online_config(hidden)]
+    pub inspect_kvdb_interval: ReadableDuration,
+    /// Threshold of CPU utilization to inspect for slow store detection.
+    #[doc(hidden)]
+    #[online_config(hidden)]
+    pub inspect_cpu_util_thd: f64,
+    #[doc(hidden)]
+    #[online_config(hidden)]
     // The unsensitive(increase it to reduce sensitiveness) of the cause-trend detection
     pub slow_trend_unsensitive_cause: f64,
+    #[doc(hidden)]
+    #[online_config(hidden)]
     // The unsensitive(increase it to reduce sensitiveness) of the result-trend detection
     pub slow_trend_unsensitive_result: f64,
 
@@ -394,9 +409,17 @@ pub struct Config {
     #[online_config(hidden)]
     #[serde(alias = "enable-partitioned-raft-kv-compatible-learner")]
     pub enable_v2_compatible_learner: bool,
+
+    /// The minimal count of region pending on applying raft logs.
+    /// Only when the count of regions which not pending on applying logs is
+    /// less than the threshold, can the raftstore supply service.
+    #[doc(hidden)]
+    #[online_config(hidden)]
+    pub min_pending_apply_region_count: u64,
 }
 
 impl Default for Config {
+    #[allow(deprecated)]
     fn default() -> Config {
         Config {
             prevote: true,
@@ -429,7 +452,7 @@ impl Default for Config {
             region_compact_min_tombstones: 10000,
             region_compact_tombstones_percent: 30,
             region_compact_min_redundant_rows: 50000,
-            region_compact_redundant_rows_percent: 20,
+            region_compact_redundant_rows_percent: Some(20),
             pd_heartbeat_tick_interval: ReadableDuration::minutes(1),
             pd_store_heartbeat_tick_interval: ReadableDuration::secs(10),
             notify_capacity: 40960,
@@ -500,7 +523,13 @@ impl Default for Config {
             region_max_size: ReadableSize(0),
             region_split_size: ReadableSize(0),
             clean_stale_peer_delay: ReadableDuration::minutes(0),
-            inspect_interval: ReadableDuration::millis(500),
+            inspect_interval: ReadableDuration::millis(100),
+            inspect_kvdb_interval: ReadableDuration::secs(2),
+            // The default value of `inspect_cpu_util_thd` is 0.4, which means
+            // when the cpu utilization is greater than 40%, the store might be
+            // regarded as a slow node if there exists delayed inspected messages.
+            // It's good enough for most cases to reduce the false positive rate.
+            inspect_cpu_util_thd: 0.4,
             // The param `slow_trend_unsensitive_cause == 2.0` can yield good results,
             // make it `10.0` to reduce a bit sensitiveness because SpikeFilter is disabled
             slow_trend_unsensitive_cause: 10.0,
@@ -510,6 +539,7 @@ impl Default for Config {
             renew_leader_lease_advance_duration: ReadableDuration::secs(0),
             allow_unsafe_vote_after_start: false,
             report_region_buckets_tick_interval: ReadableDuration::secs(10),
+            gc_peer_check_interval: ReadableDuration::secs(60),
             max_snapshot_file_raw_size: ReadableSize::mb(100),
             unreachable_backoff: ReadableDuration::secs(10),
             // TODO: make its value reasonable
@@ -518,6 +548,7 @@ impl Default for Config {
             check_request_snapshot_interval: ReadableDuration::minutes(1),
             enable_v2_compatible_learner: false,
             unsafe_disable_check_quorum: false,
+            min_pending_apply_region_count: 10,
         }
     }
 }
@@ -581,6 +612,10 @@ impl Config {
         self.region_compact_check_step.unwrap()
     }
 
+    pub fn region_compact_redundant_rows_percent(&self) -> u64 {
+        self.region_compact_redundant_rows_percent.unwrap()
+    }
+
     #[inline]
     pub fn warmup_entry_cache_enabled(&self) -> bool {
         self.max_entry_cache_warmup_duration.0 != Duration::from_secs(0)
@@ -619,6 +654,29 @@ impl Config {
 
         if self.raft_log_gc_count_limit.is_none() && raft_kv_v2 {
             self.raft_log_gc_count_limit = Some(10000);
+        }
+    }
+
+    /// Optimize the interval of different inspectors according to the
+    /// configuration.
+    pub fn optimize_inspector(&mut self, separated_raft_mount_path: bool) {
+        // If the kvdb uses the same mount path with raftdb, the health status
+        // of kvdb will be inspected by raftstore automatically. So it's not necessary
+        // to inspect kvdb.
+        if !separated_raft_mount_path {
+            self.inspect_kvdb_interval = ReadableDuration::ZERO;
+        } else {
+            // If the inspect_kvdb_interval is less than inspect_interval, it should
+            // use `inspect_interval` * 10 as an empirical inspect interval for KvDB Disk
+            // I/O.
+            let inspect_kvdb_interval = if self.inspect_kvdb_interval < self.inspect_interval
+                && self.inspect_kvdb_interval != ReadableDuration::ZERO
+            {
+                self.inspect_interval * 10
+            } else {
+                self.inspect_kvdb_interval
+            };
+            self.inspect_kvdb_interval = inspect_kvdb_interval;
         }
     }
 
@@ -766,6 +824,15 @@ impl Config {
             ));
         }
 
+        let region_compact_redundant_rows_percent =
+            self.region_compact_redundant_rows_percent.unwrap();
+        if !(1..=100).contains(&region_compact_redundant_rows_percent) {
+            return Err(box_err!(
+                "region-compact-redundant-rows-percent must between 1 and 100, current value is {}",
+                region_compact_redundant_rows_percent
+            ));
+        }
+
         if self.local_read_batch_size == 0 {
             return Err(box_err!("local-read-batch-size must be greater than 0"));
         }
@@ -903,6 +970,12 @@ impl Config {
             ));
         }
 
+        if self.min_pending_apply_region_count == 0 {
+            return Err(box_err!(
+                "min_pending_apply_region_count must be greater than 0"
+            ));
+        }
+
         Ok(())
     }
 
@@ -992,8 +1065,11 @@ impl Config {
             .with_label_values(&["region_compact_min_redundant_rows"])
             .set(self.region_compact_min_redundant_rows as f64);
         CONFIG_RAFTSTORE_GAUGE
-            .with_label_values(&["region_compact_tombstones_percent"])
-            .set(self.region_compact_tombstones_percent as f64);
+            .with_label_values(&["region_compact_redundant_rows_percent"])
+            .set(
+                self.region_compact_redundant_rows_percent
+                    .unwrap_or_default() as f64,
+            );
         CONFIG_RAFTSTORE_GAUGE
             .with_label_values(&["pd_heartbeat_tick_interval"])
             .set(self.pd_heartbeat_tick_interval.as_secs_f64());
@@ -1035,6 +1111,9 @@ impl Config {
         CONFIG_RAFTSTORE_GAUGE
             .with_label_values(&["leader_transfer_max_log_lag"])
             .set(self.leader_transfer_max_log_lag as f64);
+        CONFIG_RAFTSTORE_GAUGE
+            .with_label_values(&["gc_peer_check_interval"])
+            .set(self.gc_peer_check_interval.as_secs_f64());
 
         CONFIG_RAFTSTORE_GAUGE
             .with_label_values(&["snap_apply_batch_size"])
@@ -1517,5 +1596,26 @@ mod tests {
             cfg.raft_log_gc_count_limit(),
             split_size * 3 / 4 / ReadableSize::kb(1)
         );
+
+        cfg = Config::new();
+        cfg.optimize_inspector(false);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::ZERO);
+
+        cfg = Config::new();
+        cfg.inspect_kvdb_interval = ReadableDuration::secs(1);
+        cfg.optimize_inspector(false);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::ZERO);
+        cfg.optimize_inspector(true);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::ZERO);
+
+        cfg.inspect_kvdb_interval = ReadableDuration::secs(1);
+        cfg.optimize_inspector(true);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::secs(1));
+
+        cfg = Config::new();
+        cfg.inspect_kvdb_interval = ReadableDuration::millis(1);
+        cfg.inspect_interval = ReadableDuration::millis(100);
+        cfg.optimize_inspector(true);
+        assert_eq!(cfg.inspect_kvdb_interval, ReadableDuration::secs(1));
     }
 }

@@ -23,6 +23,7 @@
 
 mod cache;
 mod checksum;
+mod config_manager;
 pub mod dag;
 mod endpoint;
 mod error;
@@ -43,7 +44,7 @@ use metrics::ReqTag;
 use rand::prelude::*;
 use tidb_query_common::execute_stats::ExecSummary;
 use tikv_alloc::{mem_trace, Id, MemoryTrace, MemoryTraceGuard};
-use tikv_util::{deadline::Deadline, time::Duration};
+use tikv_util::{deadline::Deadline, memory::HeapSize, time::Duration};
 use txn_types::TsSet;
 
 pub use self::{
@@ -147,6 +148,16 @@ pub struct ReqContext {
     pub allowed_in_flashback: bool,
 }
 
+impl HeapSize for ReqContext {
+    fn approximate_heap_size(&self) -> usize {
+        self.context.approximate_heap_size()
+            + self.ranges.approximate_heap_size()
+            + self.peer.as_ref().map_or(0, |p| p.as_bytes().len())
+            + self.lower_bound.approximate_heap_size()
+            + self.upper_bound.approximate_heap_size()
+    }
+}
+
 impl ReqContext {
     pub fn new(
         tag: ReqTag,
@@ -159,7 +170,11 @@ impl ReqContext {
         cache_match_version: Option<u64>,
         perf_level: PerfLevel,
     ) -> Self {
-        let deadline = Deadline::from_now(max_handle_duration);
+        let mut deadline_duration = max_handle_duration;
+        if context.max_execution_duration_ms > 0 {
+            deadline_duration = Duration::from_millis(context.max_execution_duration_ms);
+        }
+        let deadline = Deadline::from_now(deadline_duration);
         let bypass_locks = TsSet::from_u64s(context.take_resolved_locks());
         let access_locks = TsSet::from_u64s(context.take_committed_locks());
         let lower_bound = match ranges.first().as_ref() {
@@ -235,6 +250,23 @@ lazy_static! {
 mod tests {
     use super::*;
 
+    fn default_req_ctx_with_ctx_duration(
+        context: kvrpcpb::Context,
+        max_handle_duration: Duration,
+    ) -> ReqContext {
+        ReqContext::new(
+            ReqTag::test,
+            context,
+            Vec::new(),
+            max_handle_duration,
+            None,
+            None,
+            TimeStamp::max(),
+            None,
+            PerfLevel::EnableCount,
+        )
+    }
+
     #[test]
     fn test_build_task_id() {
         let mut ctx = ReqContext::default_for_test();
@@ -245,5 +277,28 @@ mod tests {
 
         ctx.context.set_task_id(0);
         assert_eq!(ctx.build_task_id(), start_ts);
+    }
+
+    #[test]
+    fn test_deadline_from_req_ctx() {
+        let ctx = kvrpcpb::Context::default();
+        let max_handle_duration = Duration::from_millis(100);
+        let req_ctx = default_req_ctx_with_ctx_duration(ctx, max_handle_duration);
+        // sleep at least 100ms
+        std::thread::sleep(Duration::from_millis(200));
+        req_ctx
+            .deadline
+            .check()
+            .expect_err("deadline should exceed");
+
+        let mut ctx = kvrpcpb::Context::default();
+        ctx.max_execution_duration_ms = 100_000;
+        let req_ctx = default_req_ctx_with_ctx_duration(ctx, max_handle_duration);
+        // sleep at least 100ms
+        std::thread::sleep(Duration::from_millis(200));
+        req_ctx
+            .deadline
+            .check()
+            .expect("deadline should not exceed");
     }
 }

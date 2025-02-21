@@ -16,10 +16,10 @@ use kvproto::{
     },
     kvrpcpb::ApiVersion,
 };
-use tikv_util::{error, info, warn, worker::*};
+use tikv_util::{error, info, memory::MemoryQuota, warn, worker::*};
 
 use crate::{
-    channel::{channel, MemoryQuota, Sink, CDC_CHANNLE_CAPACITY},
+    channel::{channel, Sink, CDC_CHANNLE_CAPACITY},
     delegate::{Downstream, DownstreamId, DownstreamState, ObservedRange},
     endpoint::{Deregister, Task},
 };
@@ -100,9 +100,9 @@ struct DownstreamValue {
 }
 
 impl Conn {
-    pub fn new(sink: Sink, peer: String) -> Conn {
+    pub fn new(conn_id: ConnId, sink: Sink, peer: String) -> Conn {
         Conn {
-            id: ConnId::new(),
+            id: conn_id,
             sink,
             downstreams: HashMap::default(),
             peer,
@@ -244,14 +244,14 @@ impl EventFeedHeaders {
 #[derive(Clone)]
 pub struct Service {
     scheduler: Scheduler<Task>,
-    memory_quota: MemoryQuota,
+    memory_quota: Arc<MemoryQuota>,
 }
 
 impl Service {
     /// Create a ChangeData service.
     ///
     /// It requires a scheduler of an `Endpoint` in order to schedule tasks.
-    pub fn new(scheduler: Scheduler<Task>, memory_quota: MemoryQuota) -> Service {
+    pub fn new(scheduler: Scheduler<Task>, memory_quota: Arc<MemoryQuota>) -> Service {
         Service {
             scheduler,
             memory_quota,
@@ -304,6 +304,13 @@ impl Service {
         scheduler.schedule(task).map_err(|e| format!("{:?}", e))
     }
 
+    // ### Command types:
+    // * Register registers a region. 1) both `request_id` and `region_id` must be
+    //   specified; 2) `request_id` can be 0 but `region_id` can not.
+    // * Deregister deregisters some regions in one same `request_id` or just one
+    //   region. 1) if both `request_id` and `region_id` are specified, just
+    //   deregister the region; 2) if only `request_id` is specified, all region
+    //   subscriptions with the same `request_id` will be deregistered.
     fn handle_request(
         scheduler: &Scheduler<Task>,
         peer: &str,
@@ -327,18 +334,19 @@ impl Service {
         request: ChangeDataRequest,
         conn_id: ConnId,
     ) -> Result<(), String> {
-        let observed_range =
-            match ObservedRange::new(request.start_key.clone(), request.end_key.clone()) {
-                Ok(observed_range) => observed_range,
-                Err(e) => {
-                    warn!(
-                        "cdc invalid observed start key or end key version";
-                        "downstream" => ?peer, "region_id" => request.region_id,
-                        "error" => ?e,
-                    );
-                    ObservedRange::default()
-                }
-            };
+        let observed_range = ObservedRange::new(request.start_key.clone(), request.end_key.clone())
+            .unwrap_or_else(|e| {
+                warn!(
+                    "cdc invalid observed start key or end key version";
+                    "downstream" => ?peer,
+                    "region_id" => request.region_id,
+                    "request_id" => request.region_id,
+                    "error" => ?e,
+                    "start_key" => log_wrappers::Value::key(&request.start_key),
+                    "end_key" => log_wrappers::Value::key(&request.end_key),
+                );
+                ObservedRange::default()
+            });
         let downstream = Downstream::new(
             peer.to_owned(),
             request.get_region_epoch().clone(),
@@ -361,10 +369,18 @@ impl Service {
         request: ChangeDataRequest,
         conn_id: ConnId,
     ) -> Result<(), String> {
-        let task = Task::Deregister(Deregister::Request {
-            conn_id,
-            request_id: request.request_id,
-        });
+        let task = if request.region_id != 0 {
+            Task::Deregister(Deregister::Region {
+                conn_id,
+                request_id: request.request_id,
+                region_id: request.region_id,
+            })
+        } else {
+            Task::Deregister(Deregister::Request {
+                conn_id,
+                request_id: request.request_id,
+            })
+        };
         scheduler.schedule(task).map_err(|e| format!("{:?}", e))
     }
 
@@ -390,10 +406,10 @@ impl Service {
         event_feed_v2: bool,
     ) {
         sink.enhance_batch(true);
+        let conn_id = ConnId::new();
         let (event_sink, mut event_drain) =
-            channel(CDC_CHANNLE_CAPACITY, self.memory_quota.clone());
-        let conn = Conn::new(event_sink, ctx.peer());
-        let conn_id = conn.get_id();
+            channel(conn_id, CDC_CHANNLE_CAPACITY, self.memory_quota.clone());
+        let conn = Conn::new(conn_id, event_sink, ctx.peer());
         let mut explicit_features = vec![];
 
         if event_feed_v2 {
@@ -518,7 +534,7 @@ mod tests {
     use crate::channel::{recv_timeout, CdcEvent};
 
     fn new_rpc_suite(capacity: usize) -> (Server, ChangeDataClient, ReceiverWrapper<Task>) {
-        let memory_quota = MemoryQuota::new(capacity);
+        let memory_quota = Arc::new(MemoryQuota::new(capacity));
         let (scheduler, rx) = dummy_scheduler();
         let cdc_service = Service::new(scheduler, memory_quota);
         let env = Arc::new(EnvBuilder::new().build());
@@ -560,7 +576,14 @@ mod tests {
         let send = || {
             let rts_ = rts.clone();
             let mut sink_ = sink.clone();
-            Box::pin(async move { sink_.send_all(vec![CdcEvent::ResolvedTs(rts_)]).await })
+            Box::pin(async move {
+                sink_
+                    .send_all(
+                        vec![CdcEvent::ResolvedTs(rts_)],
+                        Arc::new(Default::default()),
+                    )
+                    .await
+            })
         };
         let must_fill_window = || {
             let mut window_size = 0;

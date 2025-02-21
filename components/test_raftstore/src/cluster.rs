@@ -4,7 +4,10 @@ use std::{
     collections::hash_map::Entry as MapEntry,
     error::Error as StdError,
     result,
-    sync::{mpsc, Arc, Mutex, RwLock},
+    sync::{
+        mpsc::{self},
+        Arc, Mutex, RwLock,
+    },
     thread,
     time::Duration,
 };
@@ -19,7 +22,7 @@ use engine_traits::{
     WriteBatch, WriteBatchExt, CF_DEFAULT, CF_RAFT,
 };
 use file_system::IoRateLimiter;
-use futures::{self, channel::oneshot, executor::block_on, future::BoxFuture};
+use futures::{self, channel::oneshot, executor::block_on, future::BoxFuture, StreamExt};
 use kvproto::{
     errorpb::Error as PbError,
     kvrpcpb::{ApiVersion, Context, DiskFullOpt},
@@ -49,9 +52,8 @@ use raftstore::{
 use resource_control::ResourceGroupManager;
 use tempfile::TempDir;
 use test_pd_client::TestPdClient;
-use tikv::server::Result as ServerResult;
+use tikv::{config::TikvConfig, server::Result as ServerResult};
 use tikv_util::{
-    mpsc::future,
     thread_group::GroupProperties,
     time::{Instant, ThreadReadId},
     worker::LazyWorker,
@@ -192,10 +194,7 @@ impl<T: Simulator> Cluster<T> {
         // TODO: In the future, maybe it's better to test both case where
         // `use_delete_range` is true and false
         Cluster {
-            cfg: Config {
-                tikv: new_tikv_config_with_api_ver(id, api_version),
-                prefer_mem: true,
-            },
+            cfg: Config::new(new_tikv_config_with_api_ver(id, api_version), true),
             leaders: HashMap::default(),
             count,
             paths: vec![],
@@ -215,6 +214,11 @@ impl<T: Simulator> Cluster<T> {
             kv_statistics: vec![],
             raft_statistics: vec![],
         }
+    }
+
+    pub fn set_cfg(&mut self, mut cfg: TikvConfig) {
+        cfg.cfg_path = self.cfg.tikv.cfg_path.clone();
+        self.cfg.tikv = cfg;
     }
 
     // To destroy temp dir later.
@@ -969,7 +973,7 @@ impl<T: Simulator> Cluster<T> {
     pub fn async_request(
         &mut self,
         req: RaftCmdRequest,
-    ) -> Result<future::Receiver<RaftCmdResponse>> {
+    ) -> Result<BoxFuture<'static, RaftCmdResponse>> {
         self.async_request_with_opts(req, Default::default())
     }
 
@@ -977,21 +981,24 @@ impl<T: Simulator> Cluster<T> {
         &mut self,
         mut req: RaftCmdRequest,
         opts: RaftCmdExtraOpts,
-    ) -> Result<future::Receiver<RaftCmdResponse>> {
+    ) -> Result<BoxFuture<'static, RaftCmdResponse>> {
         let region_id = req.get_header().get_region_id();
         let leader = self.leader_of_region(region_id).unwrap();
         req.mut_header().set_peer(leader.clone());
-        let (cb, rx) = make_cb(&req);
+        let (cb, mut rx) = make_cb(&req);
         self.sim
             .rl()
             .async_command_on_node_with_opts(leader.get_store_id(), req, cb, opts)?;
-        Ok(rx)
+        Ok(Box::pin(async move {
+            let fut = rx.next();
+            fut.await.unwrap()
+        }))
     }
 
     pub fn async_exit_joint(
         &mut self,
         region_id: u64,
-    ) -> Result<future::Receiver<RaftCmdResponse>> {
+    ) -> Result<BoxFuture<'static, RaftCmdResponse>> {
         let region = block_on(self.pd_client.get_region_by_id(region_id))
             .unwrap()
             .unwrap();
@@ -1007,7 +1014,7 @@ impl<T: Simulator> Cluster<T> {
         &mut self,
         key: &[u8],
         value: &[u8],
-    ) -> Result<future::Receiver<RaftCmdResponse>> {
+    ) -> Result<BoxFuture<'static, RaftCmdResponse>> {
         let mut region = self.get_region(key);
         let reqs = vec![new_put_cmd(key, value)];
         let put = new_request(region.get_id(), region.take_region_epoch(), reqs, false);
@@ -1018,7 +1025,7 @@ impl<T: Simulator> Cluster<T> {
         &mut self,
         region_id: u64,
         peer: metapb::Peer,
-    ) -> Result<future::Receiver<RaftCmdResponse>> {
+    ) -> Result<BoxFuture<'static, RaftCmdResponse>> {
         let region = block_on(self.pd_client.get_region_by_id(region_id))
             .unwrap()
             .unwrap();
@@ -1031,7 +1038,7 @@ impl<T: Simulator> Cluster<T> {
         &mut self,
         region_id: u64,
         peer: metapb::Peer,
-    ) -> Result<future::Receiver<RaftCmdResponse>> {
+    ) -> Result<BoxFuture<'static, RaftCmdResponse>> {
         let region = block_on(self.pd_client.get_region_by_id(region_id))
             .unwrap()
             .unwrap();
@@ -1296,6 +1303,34 @@ impl<T: Simulator> Cluster<T> {
         );
     }
 
+    pub fn wait_peer_role(&self, region_id: u64, store_id: u64, peer_id: u64, role: PeerRole) {
+        for _ in 0..100 {
+            if let Some(state) = self
+                .get_engine(store_id)
+                .get_msg_cf::<RegionLocalState>(
+                    engine_traits::CF_RAFT,
+                    &keys::region_state_key(region_id),
+                )
+                .unwrap()
+            {
+                let peer = state
+                    .get_region()
+                    .get_peers()
+                    .iter()
+                    .find(|p| p.get_id() == peer_id)
+                    .unwrap();
+                if peer.role == role {
+                    return;
+                }
+            }
+            sleep_ms(10);
+        }
+        panic!(
+            "[region {}] peer state still not reach {:?}",
+            region_id, role
+        );
+    }
+
     pub fn wait_last_index(
         &mut self,
         region_id: u64,
@@ -1461,6 +1496,7 @@ impl<T: Simulator> Cluster<T> {
                 split_keys: vec![split_key],
                 callback: cb,
                 source: "test".into(),
+                share_source_region_size: false,
             },
         )
         .unwrap();
@@ -1932,7 +1968,7 @@ impl<T: Simulator> Cluster<T> {
                 start_key: None,
                 end_key: None,
                 policy: CheckPolicy::Scan,
-                source: "test",
+                source: "bucket",
                 cb,
             },
         )

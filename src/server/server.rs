@@ -101,6 +101,8 @@ where
             .http2_max_ping_strikes(i32::MAX) // For pings without data from clients.
             .keepalive_time(self.cfg.value().grpc_keepalive_time.into())
             .keepalive_timeout(self.cfg.value().grpc_keepalive_timeout.into())
+            .default_compression_algorithm(self.cfg.value().grpc_compression_algorithm())
+            .default_gzip_compression_level(self.cfg.value().grpc_gzip_compression_level)
             .build_args();
 
         let sb = ServerBuilder::new(Arc::clone(&env))
@@ -437,6 +439,7 @@ pub mod test_router {
     use engine_rocks::{RocksEngine, RocksSnapshot};
     use kvproto::raft_serverpb::RaftMessage;
     use raftstore::{router::RaftStoreRouter, store::*, Result as RaftStoreResult};
+    use tikv_util::time::Instant as TiInstant;
 
     use super::*;
 
@@ -471,14 +474,18 @@ pub mod test_router {
             cmd: RaftCommand<RocksSnapshot>,
         ) -> std::result::Result<(), crossbeam::channel::TrySendError<RaftCommand<RocksSnapshot>>>
         {
-            let _ = self.tx.send(Either::Left(PeerMsg::RaftCommand(cmd)));
+            let _ = self
+                .tx
+                .send(Either::Left(PeerMsg::RaftCommand(Box::new(cmd))));
             Ok(())
         }
     }
 
     impl CasualRouter<RocksEngine> for TestRaftStoreRouter {
         fn send(&self, _: u64, msg: CasualMessage<RocksEngine>) -> RaftStoreResult<()> {
-            let _ = self.tx.send(Either::Left(PeerMsg::CasualMessage(msg)));
+            let _ = self
+                .tx
+                .send(Either::Left(PeerMsg::CasualMessage(Box::new(msg))));
             Ok(())
         }
     }
@@ -496,12 +503,10 @@ pub mod test_router {
 
     impl RaftStoreRouter<RocksEngine> for TestRaftStoreRouter {
         fn send_raft_msg(&self, msg: RaftMessage) -> RaftStoreResult<()> {
-            let _ = self
-                .tx
-                .send(Either::Left(PeerMsg::RaftMessage(InspectedRaftMessage {
-                    heap_size: 0,
-                    msg,
-                })));
+            let _ = self.tx.send(Either::Left(PeerMsg::RaftMessage(
+                Box::new(InspectedRaftMessage { heap_size: 0, msg }),
+                Some(TiInstant::now()),
+            )));
             Ok(())
         }
 
@@ -533,8 +538,8 @@ mod tests {
 
     use super::{
         super::{
-            resolve::{Callback as ResolveCallback, StoreAddrResolver},
-            Config, Result,
+            resolve::{self, Callback as ResolveCallback, StoreAddrResolver},
+            Config,
         },
         *,
     };
@@ -552,7 +557,7 @@ mod tests {
     }
 
     impl StoreAddrResolver for MockResolver {
-        fn resolve(&self, _: u64, cb: ResolveCallback) -> Result<()> {
+        fn resolve(&self, _: u64, cb: ResolveCallback) -> resolve::Result<()> {
             if self.quick_fail.load(Ordering::SeqCst) {
                 return Err(box_err!("quick fail"));
             }

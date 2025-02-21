@@ -2,7 +2,7 @@
 
 use std::{
     fmt, mem,
-    sync::{mpsc::SyncSender, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -80,7 +80,9 @@ impl<EK: KvEngine, ER: RaftEngine> UnsafeRecoveryHandle for Mutex<RaftRouter<EK,
 
     fn broadcast_exit_force_leader(&self) {
         let router = self.lock().unwrap();
-        router.broadcast_normal(|| PeerMsg::SignificantMsg(SignificantMsg::ExitForceLeaderState));
+        router.broadcast_normal(|| {
+            PeerMsg::SignificantMsg(Box::new(SignificantMsg::ExitForceLeaderState))
+        });
     }
 
     fn send_create_peer(
@@ -130,14 +132,18 @@ impl<EK: KvEngine, ER: RaftEngine> UnsafeRecoveryHandle for Mutex<RaftRouter<EK,
     fn broadcast_wait_apply(&self, syncer: UnsafeRecoveryWaitApplySyncer) {
         let router = self.lock().unwrap();
         router.broadcast_normal(|| {
-            PeerMsg::SignificantMsg(SignificantMsg::UnsafeRecoveryWaitApply(syncer.clone()))
+            PeerMsg::SignificantMsg(Box::new(SignificantMsg::UnsafeRecoveryWaitApply(
+                syncer.clone(),
+            )))
         });
     }
 
     fn broadcast_fill_out_report(&self, syncer: UnsafeRecoveryFillOutReportSyncer) {
         let router = self.lock().unwrap();
         router.broadcast_normal(|| {
-            PeerMsg::SignificantMsg(SignificantMsg::UnsafeRecoveryFillOutReport(syncer.clone()))
+            PeerMsg::SignificantMsg(Box::new(SignificantMsg::UnsafeRecoveryFillOutReport(
+                syncer.clone(),
+            )))
         });
     }
 
@@ -241,7 +247,7 @@ pub struct UnsafeRecoveryForceLeaderSyncer(Arc<InvokeClosureOnDrop>);
 impl UnsafeRecoveryForceLeaderSyncer {
     pub fn new(report_id: u64, router: Arc<dyn UnsafeRecoveryHandle>) -> Self {
         let inner = InvokeClosureOnDrop(Some(Box::new(move || {
-            info!("Unsafe recovery, force leader finished.");
+            info!("Unsafe recovery, force leader finished."; "report_id" => report_id);
             start_unsafe_recovery_report(router, report_id, false);
         })));
         UnsafeRecoveryForceLeaderSyncer(Arc::new(inner))
@@ -260,49 +266,15 @@ impl UnsafeRecoveryExecutePlanSyncer {
         let abort = Arc::new(Mutex::new(false));
         let abort_clone = abort.clone();
         let closure = InvokeClosureOnDrop(Some(Box::new(move || {
-            info!("Unsafe recovery, plan execution finished");
             if *abort_clone.lock().unwrap() {
-                warn!("Unsafe recovery, plan execution aborted");
+                warn!("Unsafe recovery, plan execution aborted"; "report_id" => report_id);
                 return;
             }
+            info!("Unsafe recovery, plan execution finished"; "report_id" => report_id);
             start_unsafe_recovery_report(router, report_id, true);
         })));
         UnsafeRecoveryExecutePlanSyncer {
             time: TiInstant::now(),
-            _closure: Arc::new(closure),
-            abort,
-        }
-    }
-
-    pub fn abort(&self) {
-        *self.abort.lock().unwrap() = true;
-    }
-}
-// Syncer only send to leader in 2nd BR restore
-#[derive(Clone, Debug)]
-pub struct SnapshotRecoveryWaitApplySyncer {
-    _closure: Arc<InvokeClosureOnDrop>,
-    abort: Arc<Mutex<bool>>,
-}
-
-impl SnapshotRecoveryWaitApplySyncer {
-    pub fn new(region_id: u64, sender: SyncSender<u64>) -> Self {
-        let thread_safe_router = Mutex::new(sender);
-        let abort = Arc::new(Mutex::new(false));
-        let abort_clone = abort.clone();
-        let closure = InvokeClosureOnDrop(Some(Box::new(move || {
-            info!("region {} wait apply finished", region_id);
-            if *abort_clone.lock().unwrap() {
-                warn!("wait apply aborted");
-                return;
-            }
-            let router_ptr = thread_safe_router.lock().unwrap();
-
-            _ = router_ptr.send(region_id).map_err(|_| {
-                warn!("reply waitapply states failure.");
-            });
-        })));
-        SnapshotRecoveryWaitApplySyncer {
             _closure: Arc::new(closure),
             abort,
         }
@@ -330,7 +302,7 @@ impl UnsafeRecoveryWaitApplySyncer {
         let abort_clone = abort.clone();
         let closure = InvokeClosureOnDrop(Some(Box::new(move || {
             if *abort_clone.lock().unwrap() {
-                warn!("Unsafe recovery, wait apply aborted");
+                warn!("Unsafe recovery, wait apply aborted"; "report_id" => report_id);
                 return;
             }
             info!("Unsafe recovery, wait apply finished");
@@ -363,7 +335,7 @@ impl UnsafeRecoveryFillOutReportSyncer {
         let reports = Arc::new(Mutex::new(vec![]));
         let reports_clone = reports.clone();
         let closure = InvokeClosureOnDrop(Some(Box::new(move || {
-            info!("Unsafe recovery, peer reports collected");
+            info!("Unsafe recovery, peer reports collected"; "report_id" => report_id);
             let mut store_report = StoreReport::default();
             {
                 let mut reports_ptr = reports_clone.lock().unwrap();
@@ -387,19 +359,6 @@ impl UnsafeRecoveryFillOutReportSyncer {
 }
 
 #[derive(Debug)]
-pub enum SnapshotRecoveryState {
-    // This state is set by the leader peer fsm. Once set, it sync and check leader commit index
-    // and force forward to last index once follower appended and then it also is checked
-    // every time this peer applies a the last index, if the last index is met, this state is
-    // reset / droppeds. The syncer is droped and send the response to the invoker, triggers
-    // the next step of recovery process.
-    WaitLogApplyToLast {
-        target_index: u64,
-        syncer: SnapshotRecoveryWaitApplySyncer,
-    },
-}
-
-#[derive(Debug)]
 pub enum UnsafeRecoveryState {
     // Stores the state that is necessary for the wait apply stage of unsafe recovery process.
     // This state is set by the peer fsm. Once set, it is checked every time this peer applies a
@@ -420,6 +379,9 @@ pub enum UnsafeRecoveryState {
     },
     Destroy(UnsafeRecoveryExecutePlanSyncer),
     WaitInitialize(UnsafeRecoveryExecutePlanSyncer),
+    // DemoteFailedVoter may fail due to some reasons. It's just a marker to avoid exiting force
+    // leader state
+    Failed,
 }
 
 impl UnsafeRecoveryState {
@@ -429,6 +391,7 @@ impl UnsafeRecoveryState {
             UnsafeRecoveryState::DemoteFailedVoters { syncer, .. }
             | UnsafeRecoveryState::Destroy(syncer)
             | UnsafeRecoveryState::WaitInitialize(syncer) => syncer.time,
+            UnsafeRecoveryState::Failed => return false,
         };
         time.saturating_elapsed() >= timeout
     }
@@ -439,6 +402,7 @@ impl UnsafeRecoveryState {
             UnsafeRecoveryState::DemoteFailedVoters { syncer, .. }
             | UnsafeRecoveryState::Destroy(syncer)
             | UnsafeRecoveryState::WaitInitialize(syncer) => &syncer.abort,
+            UnsafeRecoveryState::Failed => return true,
         };
         *abort.lock().unwrap()
     }
@@ -449,6 +413,7 @@ impl UnsafeRecoveryState {
             UnsafeRecoveryState::DemoteFailedVoters { syncer, .. }
             | UnsafeRecoveryState::Destroy(syncer)
             | UnsafeRecoveryState::WaitInitialize(syncer) => syncer.abort(),
+            UnsafeRecoveryState::Failed => (),
         }
     }
 }

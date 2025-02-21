@@ -2,7 +2,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    fmt::Display,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -30,38 +31,41 @@ use kvproto::{
     tikvpb::*,
 };
 use pd_client::PdClient;
-use protobuf::parse_from_bytes;
-use raftstore::{
-    router::{CdcRaftRouter, ServerRaftStoreRouter},
-    RegionInfoAccessor,
-};
+use raftstore::{router::CdcRaftRouter, RegionInfoAccessor};
 use resolved_ts::LeadershipResolver;
 use tempdir::TempDir;
 use test_pd_client::TestPdClient;
-use test_raftstore::{new_server_cluster, Cluster, ServerCluster, SimulateTransport};
+use test_raftstore::{new_server_cluster, Cluster, ServerCluster};
 use test_util::retry;
-use tikv::config::BackupStreamConfig;
+use tikv::config::{BackupStreamConfig, ResolvedTsConfig};
 use tikv_util::{
     codec::{
         number::NumberEncoder,
         stream_event::{EventIterator, Iterator},
     },
-    info,
+    debug, info,
     worker::LazyWorker,
     HandyRwLock,
 };
 use txn_types::{Key, TimeStamp, WriteRef};
 use walkdir::WalkDir;
 
+#[derive(Debug)]
+pub struct FileSegments {
+    path: PathBuf,
+    segments: Vec<(usize, usize)>,
+}
+
+#[derive(Default, Debug)]
+pub struct LogFiles {
+    default_cf: Vec<FileSegments>,
+    write_cf: Vec<FileSegments>,
+}
+
 pub type TestEndpoint = Endpoint<
     ErrorStore<SlashEtcStore>,
     RegionInfoAccessor,
     engine_test::kv::KvTestEngine,
-    CdcRaftRouter<
-        SimulateTransport<
-            ServerRaftStoreRouter<engine_test::kv::KvTestEngine, engine_test::raft::RaftTestEngine>,
-        >,
-    >,
     TestPdClient,
 >;
 
@@ -259,6 +263,9 @@ pub struct Suite {
 }
 
 impl Suite {
+    pub const PROMISED_SHORT_VALUE: &'static [u8] = b"hello, world";
+    pub const PROMISED_LONG_VALUE: &'static [u8] = &[0xbb; 4096];
+
     pub fn simple_task(&self, name: &str) -> StreamTask {
         let mut task = StreamTask::default();
         task.info.set_name(name.to_owned());
@@ -343,7 +350,6 @@ impl Suite {
         let (_, port) = server.bind_addrs().next().unwrap();
         let addr = format!("127.0.0.1:{}", port);
         let channel = ChannelBuilder::new(self.env.clone()).connect(&addr);
-        println!("connecting channel to {} for store {}", addr, id);
         let client = LogBackupClient::new(channel);
         self.servers.push(server);
         client
@@ -376,6 +382,7 @@ impl Suite {
             id,
             self.meta_store.clone(),
             cfg,
+            ResolvedTsConfig::default(),
             worker.scheduler(),
             ob,
             regions,
@@ -389,6 +396,11 @@ impl Suite {
 
     pub fn get_meta_cli(&self) -> MetadataClient<impl MetaStore> {
         MetadataClient::new(self.meta_store.clone(), 0)
+    }
+
+    #[allow(dead_code)]
+    pub fn dump_slash_etc(&self) {
+        self.meta_store.inner.blocking_lock().dump();
     }
 
     pub fn must_split(&mut self, key: &[u8]) {
@@ -461,7 +473,12 @@ impl Suite {
         for ts in (from..(from + n)).map(|x| x * 2) {
             let ts = ts as u64;
             let key = make_record_key(for_table, ts);
-            let muts = vec![mutation(key.clone(), b"hello, world".to_vec())];
+            let value = if ts % 4 == 0 {
+                Self::PROMISED_SHORT_VALUE.to_vec()
+            } else {
+                Self::PROMISED_LONG_VALUE.to_vec()
+            };
+            let muts = vec![mutation(key.clone(), value)];
             let enc_key = Key::from_raw(&key).into_encoded();
             let region = self.cluster.get_region_id(&enc_key);
             let start_ts = self.cluster.pd_client.get_tso().await.unwrap();
@@ -518,45 +535,52 @@ impl Suite {
         }
     }
 
-    pub fn load_metadata_for_write_records(
-        &self,
-        path: &Path,
-    ) -> HashMap<String, Vec<(usize, usize)>> {
-        let mut meta_map: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-        for entry in WalkDir::new(path) {
-            let entry = entry.unwrap();
-            if entry.file_type().is_file()
-                && entry
-                    .file_name()
-                    .to_str()
-                    .map_or(false, |s| s.ends_with(".meta"))
-            {
-                let content = std::fs::read(entry.path()).unwrap();
-                let meta = parse_from_bytes::<Metadata>(content.as_ref()).unwrap();
-                for g in meta.file_groups.into_iter() {
-                    let path = g.path.split('/').last().unwrap();
-                    for f in g.data_files_info.into_iter() {
-                        let file_info = meta_map.get_mut(path);
-                        if let Some(v) = file_info {
-                            v.push((
-                                f.range_offset as usize,
-                                (f.range_offset + f.range_length) as usize,
-                            ));
+    pub fn get_files_to_check(&self, path: &Path) -> std::io::Result<LogFiles> {
+        let mut res = LogFiles::default();
+        for entry in WalkDir::new(path.join("v1/backupmeta")) {
+            let entry = entry?;
+            if entry.file_name().to_str().unwrap().ends_with(".meta") {
+                let content = std::fs::read(entry.path())?;
+                let meta = protobuf::parse_from_bytes::<Metadata>(&content)?;
+                for fg in meta.get_file_groups() {
+                    let mut default_segs = vec![];
+                    let mut write_segs = vec![];
+                    for file in fg.get_data_files_info() {
+                        let v = if file.cf == "default" || file.cf.is_empty() {
+                            Some(&mut default_segs)
+                        } else if file.cf == "write" {
+                            Some(&mut write_segs)
                         } else {
-                            let v = vec![(
-                                f.range_offset as usize,
-                                (f.range_offset + f.range_length) as usize,
-                            )];
-                            meta_map.insert(String::from(path), v);
-                        }
+                            None
+                        };
+                        v.into_iter().for_each(|v| {
+                            v.push((
+                                file.get_range_offset() as usize,
+                                (file.get_range_offset() + file.get_range_length()) as usize,
+                            ))
+                        });
+                    }
+                    let p = path.join(fg.get_path());
+                    if !default_segs.is_empty() {
+                        res.default_cf.push(FileSegments {
+                            path: p.clone(),
+                            segments: default_segs,
+                        })
+                    }
+                    if !write_segs.is_empty() {
+                        res.write_cf.push(FileSegments {
+                            path: p,
+                            segments: write_segs,
+                        })
                     }
                 }
             }
         }
-        meta_map
+        Ok(res)
     }
 
-    pub async fn check_for_write_records<'a>(
+    #[track_caller]
+    pub fn check_for_write_records<'a>(
         &self,
         path: &Path,
         key_set: impl std::iter::Iterator<Item = &'a [u8]>,
@@ -565,41 +589,68 @@ impl Suite {
         let n = remain_keys.len();
         let mut extra_key = 0;
         let mut extra_len = 0;
-        let meta_map = self.load_metadata_for_write_records(path);
-        for entry in WalkDir::new(path) {
-            let entry = entry.unwrap();
-            println!("checking: {:?}", entry);
-            if entry.file_type().is_file()
-                && entry
-                    .file_name()
-                    .to_str()
-                    .map_or(false, |s| s.ends_with(".log"))
-            {
-                let buf = std::fs::read(entry.path()).unwrap();
-                let file_infos = meta_map.get(entry.file_name().to_str().unwrap()).unwrap();
-                for &file_info in file_infos {
-                    let mut decoder = ZstdDecoder::new(Vec::new());
-                    let pbuf: &[u8] = &buf[file_info.0..file_info.1];
-                    decoder.write_all(pbuf).await.unwrap();
-                    decoder.flush().await.unwrap();
-                    decoder.close().await.unwrap();
-                    let content = decoder.into_inner();
+        let files = self.get_files_to_check(path).unwrap_or_default();
+        let mut default_keys = HashSet::new();
+        let content_of = |buf: &[u8], range: (usize, usize)| {
+            let mut decoder = ZstdDecoder::new(Vec::new());
+            let pbuf: &[u8] = &buf[range.0..range.1];
+            run_async_test(async {
+                decoder.write_all(pbuf).await.unwrap();
+                decoder.flush().await.unwrap();
+                decoder.close().await.unwrap();
+            });
+            decoder.into_inner()
+        };
+        for entry in files.write_cf {
+            debug!("checking write: {:?}", entry);
 
-                    let mut iter = EventIterator::new(&content);
-                    loop {
-                        if !iter.valid() {
-                            break;
-                        }
-                        iter.next().unwrap();
-                        if !remain_keys.remove(iter.key()) {
-                            extra_key += 1;
-                            extra_len += iter.key().len() + iter.value().len();
-                        }
-
-                        let value = iter.value();
-                        let wf = WriteRef::parse(value).unwrap();
-                        assert_eq!(wf.short_value, Some(b"hello, world" as &[u8]));
+            let buf = std::fs::read(&entry.path).unwrap();
+            for &file_info in entry.segments.iter() {
+                let data = content_of(&buf, file_info);
+                let mut iter = EventIterator::new(&data);
+                loop {
+                    if !iter.valid() {
+                        break;
                     }
+                    iter.next().unwrap();
+                    if !remain_keys.remove(iter.key()) {
+                        extra_key += 1;
+                        extra_len += iter.key().len() + iter.value().len();
+                    }
+
+                    let value = iter.value();
+                    let wf = WriteRef::parse(value).unwrap();
+                    if wf.short_value.is_none() {
+                        let mut key = Key::from_encoded_slice(iter.key()).truncate_ts().unwrap();
+                        key.append_ts_inplace(wf.start_ts);
+
+                        default_keys.insert(key.into_encoded());
+                    } else {
+                        assert_eq!(wf.short_value, Some(Self::PROMISED_SHORT_VALUE));
+                    }
+                }
+            }
+        }
+
+        for entry in files.default_cf {
+            debug!("checking default: {:?}", entry);
+
+            let buf = std::fs::read(&entry.path).unwrap();
+            for &file_info in entry.segments.iter() {
+                let data = content_of(&buf, file_info);
+                let mut iter = EventIterator::new(&data);
+                loop {
+                    if !iter.valid() {
+                        break;
+                    }
+                    iter.next().unwrap();
+                    if !default_keys.remove(iter.key()) {
+                        extra_key += 1;
+                        extra_len += iter.key().len() + iter.value().len();
+                    }
+
+                    let value = iter.value();
+                    assert_eq!(value, Self::PROMISED_LONG_VALUE);
                 }
             }
         }
@@ -613,17 +664,19 @@ impl Suite {
                 extra_len
             )
         }
-        if !remain_keys.is_empty() {
-            panic!(
-                "not all keys are recorded: it remains {:?} (total = {})",
-                remain_keys
-                    .iter()
-                    .take(3)
-                    .map(|v| hex::encode(v))
-                    .collect::<Vec<_>>(),
-                remain_keys.len()
-            );
-        }
+        assert_empty(&remain_keys, "not all keys are recorded");
+        assert_empty(&default_keys, "some keys don't have default entry");
+    }
+}
+
+#[track_caller]
+fn assert_empty(v: &HashSet<impl AsRef<[u8]>>, msg: impl Display) {
+    if !v.is_empty() {
+        panic!(
+            "{msg}: it remains {:?}... (total = {})",
+            v.iter().take(3).map(|v| hex::encode(v)).collect::<Vec<_>>(),
+            v.len()
+        );
     }
 }
 

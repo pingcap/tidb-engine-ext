@@ -12,7 +12,7 @@ pub use self::response_channel::FlushChannel;
 pub use self::response_channel::FlushSubscriber;
 pub use self::{
     imp::{RaftRouter, UnsafeRecoveryRouter},
-    internal_message::ApplyRes,
+    internal_message::{ApplyRes, SstApplyIndex},
     message::{PeerMsg, PeerTick, RaftRequest, StoreMsg, StoreTick},
     response_channel::{
         build_any_channel, AnyResChannel, AnyResSubscriber, BaseSubscriber, CmdResChannel,
@@ -20,3 +20,4 @@ pub use self::{
         DebugInfoSubscriber, QueryResChannel, QueryResult, ReadResponse,
     },
 };
+pub use super::operation::DiskSnapBackupHandle;

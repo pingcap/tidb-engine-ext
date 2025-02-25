@@ -632,20 +632,33 @@ unsafe extern "C" fn ffi_get_lock_by_key(
     arg1: *const interfaces_ffi::EngineStoreServerWrap,
     region_id: u64,
     key: interfaces_ffi::BaseBuffView,
-) -> interfaces_ffi::BaseBuffView {
+) -> interfaces_ffi::CppStrWithView {
     let store = into_engine_store_server_wrap(arg1);
     match (*store.engine_store_server).kvstore.get(&region_id) {
         Some(e) => {
             let cf_index = interfaces_ffi::ColumnFamilyType::Lock as usize;
             let value = e.data[cf_index].get(key.to_slice()).unwrap().as_ptr();
-            interfaces_ffi::BaseBuffView {
-                data: value as *const i8,
-                len: 0,
+            interfaces_ffi::CppStrWithView {
+                // hack
+                inner: interfaces_ffi::RawCppPtr {
+                    ptr: std::ptr::null_mut(),
+                    type_: 1,
+                },
+                view: interfaces_ffi::BaseBuffView {
+                    data: value as *const i8,
+                    len: 0,
+                },
             }
         }
-        None => interfaces_ffi::BaseBuffView {
-            data: std::ptr::null(),
-            len: 0,
+        None => interfaces_ffi::CppStrWithView {
+            inner: interfaces_ffi::RawCppPtr {
+                ptr: std::ptr::null_mut(),
+                type_: 1,
+            },
+            view: interfaces_ffi::BaseBuffView {
+                data: std::ptr::null(),
+                len: 0,
+            },
         },
     }
 }

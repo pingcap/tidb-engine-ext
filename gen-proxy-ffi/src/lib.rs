@@ -110,7 +110,10 @@ pub fn gen_ffi_code() {
             println!("    {}", f);
         }
         if ori_version == hash_version {
-            println!("hash version equal, version={}, SKIP overwrite version", ori_version);
+            println!(
+                "hash version equal, version={}, SKIP overwrite version",
+                ori_version
+            );
         } else {
             println!(
                 "Original hash version is {}, start to generate rust code with new version {}",

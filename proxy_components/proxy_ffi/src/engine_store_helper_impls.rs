@@ -504,6 +504,7 @@ impl EngineStoreServerHelper {
 
     pub fn get_lock_by_key(&self, region_id: u64, key: &[u8]) -> Vec<u8> {
         unsafe { (self.fn_get_lock_by_key.into_inner())(self.inner, region_id, key.into()) }
+            .view
             .to_slice()
             .to_vec()
     }

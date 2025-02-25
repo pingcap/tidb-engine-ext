@@ -748,7 +748,7 @@ pub mod root {
                     arg1: *const root::DB::EngineStoreServerWrap,
                     arg2: u64,
                     arg3: root::DB::BaseBuffView,
-                ) -> root::DB::BaseBuffView,
+                ) -> root::DB::CppStrWithView,
             >,
             pub fn_query_fap_snapshot_state: ::std::option::Option<
                 unsafe extern "C" fn(
@@ -793,7 +793,7 @@ pub mod root {
                 arg3: root::DB::RawVoidPtr,
             ) -> u32;
         }
-        pub const RAFT_STORE_PROXY_VERSION: u64 = 2149052863435660119;
+        pub const RAFT_STORE_PROXY_VERSION: u64 = 10558255710263971014;
         pub const RAFT_STORE_PROXY_MAGIC_NUMBER: u32 = 324508639;
     }
 }

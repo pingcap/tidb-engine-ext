@@ -100,20 +100,20 @@ pub fn gen_ffi_code() {
 
     let ori_version = read_version_file(&version_cpp_file);
     println!("\nFFI src dir path is {}", src_dir);
-    println!("Original version is {}", ori_version);
+    println!("Original hash version is {}", ori_version);
 
     let (headers, hash_version) = scan_ffi_src_head(&src_dir);
 
     {
-        println!("Scan and get src files");
+        println!("Scanning src files");
         for f in &headers {
             println!("    {}", f);
         }
         if ori_version == hash_version {
-            println!("Check hash version equal & NOT overwrite version");
+            println!("hash version equal, version={}, SKIP overwrite version", ori_version);
         } else {
             println!(
-                "Current hash version is {}, start to generate rust code with version {}",
+                "Original hash version is {}, start to generate rust code with new version {}",
                 ori_version, hash_version
             );
             make_version_file(hash_version, &version_cpp_file);

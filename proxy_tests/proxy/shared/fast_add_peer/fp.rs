@@ -277,6 +277,7 @@ fn prehandle_snapshot_after_restart(kind: u64) {
     });
 
     fail::remove("on_ob_pre_handle_snapshot_s3");
+    // Under this case, still reuse the fap snapshot.
     fail::cfg("fap_core_no_prehandle", "panic").unwrap();
     iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
         assert_eq!(
@@ -286,6 +287,8 @@ fn prehandle_snapshot_after_restart(kind: u64) {
         );
     });
 
+
+    // And it can be deleted.
     check_key(&cluster, b"k3", b"v3", None, Some(true), Some(vec![3]));
 
     fail::remove("post_apply_snapshot_allow_no_unips");
@@ -299,6 +302,12 @@ fn prehandle_snapshot_after_restart(kind: u64) {
 fn test_prehandle_snapshot_after_restart_reset() {
     prehandle_snapshot_after_restart(2);
 }
+
+#[test]
+fn test_prehandle_snapshot_after_restart_1() {
+    prehandle_snapshot_after_restart(1);
+}
+
 
 // The idea is:
 // - old_one is replicated to store 3 as a normal raft snapshot. It has the
@@ -1043,5 +1052,74 @@ fn test_msgsnapshot_before_msgappend() {
     fail::remove("on_can_apply_snapshot");
     fail::remove("on_pre_write_apply_state");
     fail::remove("fap_core_no_fallback");
+    cluster.shutdown();
+}
+
+#[test]
+fn test_replay_fap_after_post_apply() {
+    let (mut cluster, pd_client) = new_mock_cluster_snap(0, 2);
+    pd_client.disable_default_operator();
+    fail::cfg("post_apply_snapshot_allow_no_unips", "return").unwrap();
+    cluster.cfg.proxy_cfg.engine_store.enable_fast_add_peer = true;
+
+    tikv_util::set_panic_hook(true, "./");
+    // Can always apply snapshot immediately
+    fail::cfg("on_can_apply_snapshot", "return(true)").unwrap();
+    fail::cfg("on_pre_write_apply_state", "return").unwrap();
+
+    let _ = cluster.run_conf_change();
+
+    cluster.must_put(b"k1", b"v1");
+    check_key(&cluster, b"k1", b"v1", Some(true), None, Some(vec![1]));
+    cluster.must_put(b"k2", b"v2");
+
+    fail::cfg("fap_core_no_fallback", "panic").unwrap();
+    pd_client.must_add_peer(1, new_learner_peer(2, 2));
+    fail::cfg("region_apply_snap", "return").unwrap();
+
+    check_key(&cluster, b"k2", b"v2", Some(false), None, Some(vec![2]));
+
+    must_wait_until_cond_node(
+        &cluster.cluster_ext,
+        1,
+        Some(vec![2]),
+        &|states: &States| -> bool {
+            states.in_disk_region_state.get_state() == PeerState::Applying
+        },
+    );
+
+    stop_tiflash_node(&mut cluster, 2);
+    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
+        assert_eq!(
+            ffi.engine_store_server_helper
+                .query_fap_snapshot_state(1, 2, 0, 0),
+            proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted
+        );
+    });
+    fail::remove("region_apply_snap");
+    restart_tiflash_node(&mut cluster, 2);
+    pd_client.must_add_peer(1, new_learner_peer(2, 2));
+    check_key(&cluster, b"k2", b"v2", Some(true), None, Some(vec![2]));
+
+    // After the snapshto data is written, the fap snapshot is deleted.
+    must_wait_until_cond_node(
+        &cluster.cluster_ext,
+        1,
+        Some(vec![2]),
+        &|states: &States| -> bool {
+            states.in_disk_region_state.get_state() != PeerState::Applying
+        },
+    );
+
+    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
+        assert_eq!(
+            ffi.engine_store_server_helper
+                .query_fap_snapshot_state(1, 2, 0, 0),
+            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
+        );
+    });
+    fail::remove("on_pre_write_apply_state");
+    fail::remove("on_can_apply_snapshot");
+    fail::remove("post_apply_snapshot_allow_no_unips");
     cluster.shutdown();
 }

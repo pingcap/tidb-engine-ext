@@ -32,18 +32,21 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
                 region_id,
                 |info: MapEntry<u64, Arc<CachedRegionInfo>>| match info {
                     MapEntry::Occupied(_) => {
-                        if !self.engine_store_server_helper.kvstore_region_exist(region_id) {
-                            if self.engine_store_server_helper.query_fap_snapshot_state(region_id, peer_id, snap_key.idx, snap_key.term) == proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted {
-                                info!("fast path: prehandle first snapshot skipped {}:{} {}", self.store_id, region_id, peer_id;
-                                    "snap_key" => ?snap_key,
-                                    "region_id" => region_id,
-                                );
-                                should_skip = true;
-                            }
+                        let already_existed = self
+                            .engine_store_server_helper
+                            .kvstore_region_exist(region_id);
+                        if self.engine_store_server_helper.query_fap_snapshot_state(region_id, peer_id, snap_key.idx, snap_key.term) == proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted {
+                            info!("fast path: prehandle first snapshot skipped {}:{} {}", self.store_id, region_id, peer_id;
+                                "snap_key" => ?snap_key,
+                                "region_id" => region_id,
+                                "already_existed" => already_existed,
+                            );
+                            should_skip = true;
                         }
                     }
                     MapEntry::Vacant(_) => {
-                        // It won't go here because cached region info is inited after restart and on the first fap message.
+                        // It won't go here because cached region info is inited after restart and on the first fap message mostly.
+                        // However, it could happens when a snapshot is replayed in `apply_snap`.
                         let pstate = self.engine_store_server_helper.query_fap_snapshot_state(region_id, peer_id, snap_key.idx, snap_key.term);
                         if pstate == proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted {
                             // We have a fap snapshot now. skip
@@ -82,16 +85,12 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
             let already_existed = self
                 .engine_store_server_helper
                 .kvstore_region_exist(region_id);
-            if already_existed {
-                debug!("fast path: skip apply snapshot because not first {}:{} {}", self.store_id, region_id, peer_id;
-                    "snap_key" => ?snap_key,
-                    "region_id" => region_id,
-                );
-                return false;
-            }
+
             info!("fast path: start applying first fap snapshot {}:{} {}", self.store_id, region_id, peer_id;
                 "snap_key" => ?snap_key,
                 "region_id" => region_id,
+                "already_existed" => already_existed,
+                "init" => self.is_initialized(region_id)
             );
             // Even if the feature is not enabled, the snapshot could still be a previously
             // generated fap snapshot. So we have to also handle this snapshot,
@@ -206,10 +205,13 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
                             applied_fap = try_apply_fap_snapshot(o.get().clone());
                         }
                         MapEntry::Vacant(_) => {
-                            // It won't go here because cached region info is inited after restart and on the first fap message.
+                            // It won't go here because cached region info is inited after restart and on the first fap message mostly.
+                            // However, it could happens when a snapshot is replayed in `apply_snap`.
+                            let inited = self.is_initialized(region_id);
                             info!("fast path: check should apply fap snapshot noexist {}:{} {}", self.store_id, region_id, peer_id;
                                 "snap_key" => ?snap_key,
                                 "region_id" => region_id,
+                                "inited" => inited,
                             );
                             assert!(self.is_initialized(region_id));
                             let o = Arc::new(CachedRegionInfo::default());

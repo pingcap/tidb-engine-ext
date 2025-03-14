@@ -368,7 +368,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
         region: &Region,
         peer_id: u64,
         snap_key: &store::SnapKey,
-        _: &Vec<(Vec<u8>, ColumnFamilyType)>,
+        _: Option<&store::Snapshot>,
     ) {
         if self.packed_envs.engine_store_cfg.enable_unips {
             if self.engine_store_server_helper.query_fap_snapshot_state(

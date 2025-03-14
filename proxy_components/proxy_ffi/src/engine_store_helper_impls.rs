@@ -368,9 +368,9 @@ impl EngineStoreServerHelper {
         unsafe { (self.fn_kvstore_region_exists.into_inner())(self.inner, region_id) }
     }
 
-    pub fn clear_fap_snapshot(&self, region_id: u64) {
+    pub fn clear_fap_snapshot(&self, region_id: u64, state: u64) {
         debug_assert!(self.fn_clear_fap_snapshot.is_some());
-        unsafe { (self.fn_clear_fap_snapshot.into_inner())(self.inner, region_id) }
+        unsafe { (self.fn_clear_fap_snapshot.into_inner())(self.inner, region_id, state) }
     }
 
     pub fn handle_ingest_sst(

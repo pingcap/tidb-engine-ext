@@ -387,7 +387,8 @@ struct EngineStoreServerHelper {
                                                   uint64_t region_id,
                                                   uint64_t new_peer_id,
                                                   uint64_t, uint64_t);
-  void (*fn_clear_fap_snapshot)(EngineStoreServerWrap *, uint64_t region_id);
+  void (*fn_clear_fap_snapshot)(EngineStoreServerWrap *, uint64_t region_id,
+                                uint64_t state);
   bool (*fn_kvstore_region_exists)(EngineStoreServerWrap *, uint64_t region_id);
   void (*fn_report_thread_allocate_info)(EngineStoreServerWrap *,
                                          uint64_t thread_id, BaseBuffView name,

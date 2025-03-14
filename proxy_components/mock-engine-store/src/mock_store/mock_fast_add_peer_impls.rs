@@ -63,10 +63,12 @@ pub(crate) unsafe extern "C" fn ffi_kvstore_region_exists(
 pub(crate) unsafe extern "C" fn ffi_clear_fap_snapshot(
     arg1: *mut interfaces_ffi::EngineStoreServerWrap,
     region_id: u64,
+    state: u64,
 ) {
     let store = into_engine_store_server_wrap(arg1);
     debug!("ffi_clear_fap_snapshot clean";
-        "region_id" => region_id
+        "region_id" => region_id,
+        "state" => state
     );
     (*store.engine_store_server)
         .tmp_fap_regions

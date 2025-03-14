@@ -760,7 +760,11 @@ pub mod root {
                 ) -> root::DB::FapSnapshotState,
             >,
             pub fn_clear_fap_snapshot: ::std::option::Option<
-                unsafe extern "C" fn(arg1: *mut root::DB::EngineStoreServerWrap, region_id: u64),
+                unsafe extern "C" fn(
+                    arg1: *mut root::DB::EngineStoreServerWrap,
+                    region_id: u64,
+                    state: u64,
+                ),
             >,
             pub fn_kvstore_region_exists: ::std::option::Option<
                 unsafe extern "C" fn(
@@ -793,7 +797,7 @@ pub mod root {
                 arg3: root::DB::RawVoidPtr,
             ) -> u32;
         }
-        pub const RAFT_STORE_PROXY_VERSION: u64 = 10558255710263971014;
+        pub const RAFT_STORE_PROXY_VERSION: u64 = 2987646552689542817;
         pub const RAFT_STORE_PROXY_MAGIC_NUMBER: u32 = 324508639;
     }
 }

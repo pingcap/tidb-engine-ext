@@ -37,10 +37,12 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
         }
     }
 
-    // Only use after phase 1 is finished.
+    // Only use after phase 1 is finished and the FAP snapshot is not useable,
+    // otherwise, just call `fallback_to_slow_path` and let `post_apply_snapshot` to
+    // decide.
     pub fn fap_fallback_to_slow(&self, region_id: u64) {
         self.engine_store_server_helper
-            .clear_fap_snapshot(region_id);
+            .clear_fap_snapshot(region_id, 0); // 0 for fallback
         let mut wb = self.raft_engine.log_batch(2);
         let raft_state = kvproto::raft_serverpb::RaftLocalState::default();
         let _ = self.raft_engine.clean(region_id, 0, &raft_state, &mut wb);
@@ -58,7 +60,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
     ) {
         if clean_fap_snapshot {
             self.engine_store_server_helper
-                .clear_fap_snapshot(region_id);
+                .clear_fap_snapshot(region_id, 0); // 0 for fallback
         }
         let mut wb = self.raft_engine.log_batch(2);
         let raft_state = kvproto::raft_serverpb::RaftLocalState::default();
@@ -475,7 +477,9 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
                         // We call fallback here even if the fap is persisted and sent.
                         // Because the sent snapshot is only to be handled if (idnex, term) matches,
                         // even if there is another normal snapshot. Because both snapshots are
-                        // idendical. TODO However, we can retry FAP for
+                        // idendical.
+                        // IMPORTANT!! Do not clear the fap snapshot here, they can be still useful.
+                        // TODO However, we can retry FAP for
                         // several times before we fail. However,
                         // the cases here is rare. We have only observed several raft logs missing
                         // problem.
@@ -486,6 +490,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
                 };
             }
             Err(e) => {
+                // TODO we have noticed that in cse, the snapshot could not be sent.
                 info!(
                     "fast path: ongoing {}:{} {} failed. build and sent snapshot error {:?}",
                     self.store_id, region_id, new_peer_id, e;

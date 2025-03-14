@@ -315,16 +315,20 @@ where
         fail_point!("region_apply_snap_io_err", |_| {
             Err(crate::store::SnapError::Other(box_err!("io error")))
         });
+        info!("!!!!! begin apply snap data 000"; "region_id" => region_id, "peer_id" => peer_id);
         check_abort(&abort)?;
 
+        info!("!!!!! begin apply snap data 111"; "region_id" => region_id, "peer_id" => peer_id);
         let mut region_state = self.region_state(region_id)?;
         let region = region_state.get_region().clone();
 
         let start_key = keys::enc_start_key(&region);
         let end_key = keys::enc_end_key(&region);
         check_abort(&abort)?;
+        info!("!!!!! begin apply snap data 222"; "region_id" => region_id, "peer_id" => peer_id);
         self.clean_overlap_ranges(start_key, end_key)?;
         check_abort(&abort)?;
+        info!("!!!!! begin apply snap data 333"; "region_id" => region_id, "peer_id" => peer_id);
         fail_point!("apply_snap_cleanup_range");
 
         // apply snapshot
@@ -336,10 +340,13 @@ where
         defer!({
             self.mgr.deregister(&snap_key, &SnapEntry::Applying);
         });
+        info!("!!!!! begin apply snap data 444"; "region_id" => region_id, "peer_id" => peer_id);
         let mut s = box_try!(self.mgr.get_snapshot_for_applying(&snap_key));
         if !s.exists() {
             return Err(box_err!("missing snapshot file {}", s.path()));
         }
+        info!("!!!!! begin apply snap data 555"; "region_id" => region_id, "peer_id" => peer_id);
+
         check_abort(&abort)?;
         let timer = Instant::now();
         let options = ApplyOptions {
@@ -350,9 +357,12 @@ where
             coprocessor_host: self.coprocessor_host.clone(),
             ingest_copy_symlink: self.ingest_copy_symlink,
         };
+        info!("!!!!! begin apply snap data 666"; "region_id" => region_id, "peer_id" => peer_id);
+
         s.apply(options)?;
         self.coprocessor_host
             .post_apply_snapshot(&region, peer_id, &snap_key, Some(&s));
+        info!("!!!!! begin apply snap data 777"; "region_id" => region_id, "peer_id" => peer_id);
 
         // Delete snapshot state and assure the relative region state and snapshot state
         // is updated and flushed into kvdb.
@@ -365,6 +375,9 @@ where
         wb.write_opt(&wopts).unwrap_or_else(|e| {
             panic!("{} failed to save apply_snap result: {:?}", region_id, e);
         });
+        info!("!!!!! begin apply snap data 888"; "region_id" => region_id, "peer_id" => peer_id);
+        self.coprocessor_host
+            .on_apply_snapshot_committed(&region, peer_id, &snap_key, Some(&s));
         info!(
             "apply new data";
             "region_id" => region_id,

@@ -20,21 +20,21 @@ pub(crate) unsafe extern "C" fn ffi_query_fap_snapshot_state(
     match (*store.engine_store_server).tmp_fap_regions.get(&region_id) {
         Some(e) => {
             if index == 0 && term == 0 {
-                debug!("ffi_query_fap_snapshot_state: found unchecked snapshot";
+                info!("ffi_query_fap_snapshot_state: found unchecked snapshot";
                     "region_id" => region_id,
                     "index" => index,
                     "term" => term,
                 );
                 interfaces_ffi::FapSnapshotState::Persisted
             } else if e.apply_state.get_applied_index() == index && e.applied_term == term {
-                debug!("ffi_query_fap_snapshot_state: found matched snapshot";
+                info!("ffi_query_fap_snapshot_state: found matched snapshot";
                     "region_id" => region_id,
                     "index" => index,
                     "term" => term,
                 );
                 interfaces_ffi::FapSnapshotState::Persisted
             } else {
-                debug!("ffi_query_fap_snapshot_state: mismatch snapshot";
+                info!("ffi_query_fap_snapshot_state: mismatch snapshot";
                     "region_id" => region_id,
                     "index" => index,
                     "term" => term,
@@ -80,15 +80,25 @@ pub(crate) unsafe extern "C" fn ffi_apply_fap_snapshot(
     region_id: u64,
     peer_id: u64,
     assert_exist: u8,
-    _index: u64,
+    index: u64,
     _term: u64,
 ) -> u8 {
     let store = into_engine_store_server_wrap(arg1);
-    let new_region = match (*store.engine_store_server)
-        .tmp_fap_regions
-        .remove(&region_id)
     {
-        Some(e) => e,
+        if let Some(target_region) = (*store.engine_store_server).kvstore.get_mut(&region_id) {
+            if target_region.apply_state.get_applied_index() != index {
+                panic!(
+                    "don't support FAP for an existing region region_id={} peed_id={} snap_index={} index={}",
+                    region_id,
+                    peer_id,
+                    index,
+                    target_region.apply_state.get_applied_index()
+                );
+            }
+        }
+    }
+    let new_region = match (*store.engine_store_server).tmp_fap_regions.get(&region_id) {
+        Some(e) => e.clone(),
         None => {
             info!("not a fap snapshot";
                 "region_id" => region_id,

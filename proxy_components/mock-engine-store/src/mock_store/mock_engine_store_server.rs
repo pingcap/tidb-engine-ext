@@ -233,7 +233,8 @@ pub(crate) unsafe fn write_snapshot_to_db_data_by_engine(
     info!("mock flush snapshot to engine";
         "region" => ?region.region,
         "store_id" => store_id,
-        "reason" => reason
+        "reason" => reason,
+        "apply_state" => ?region.apply_state
     );
     let mut batch = kv.rocks.log_batch(1000);
     let local_state = kvproto::raft_serverpb::RaftLocalState::default();

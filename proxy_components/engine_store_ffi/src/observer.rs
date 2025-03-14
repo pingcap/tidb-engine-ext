@@ -238,6 +238,17 @@ impl<T: Transport + 'static, ER: RaftEngine> ApplySnapshotObserver for TiFlashOb
     fn cancel_apply_snapshot(&self, region_id: u64, peer_id: u64) {
         self.forwarder.cancel_apply_snapshot(region_id, peer_id)
     }
+
+    fn on_apply_snapshot_committed(
+        &self,
+        ob_ctx: &mut ObserverContext<'_>,
+        id: u64,
+        k: &raftstore::store::SnapKey,
+        s: Option<&raftstore::store::Snapshot>,
+    ) {
+        self.forwarder
+            .on_apply_snapshot_committed(ob_ctx.region(), id, k, s)
+    }
 }
 
 impl<T: Transport + 'static, ER: RaftEngine> RoleObserver for TiFlashObserver<T, ER> {

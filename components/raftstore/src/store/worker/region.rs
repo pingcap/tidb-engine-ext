@@ -364,6 +364,7 @@ where
             .post_apply_snapshot(&region, peer_id, &snap_key, Some(&s));
         info!("!!!!! begin apply snap data 777"; "region_id" => region_id, "peer_id" => peer_id);
 
+        fail_point!("region_apply_snap_before_write", |_| { Ok(()) });
         // Delete snapshot state and assure the relative region state and snapshot state
         // is updated and flushed into kvdb.
         region_state.set_state(PeerState::Normal);
@@ -401,6 +402,7 @@ where
 
         let tombstone = match self.apply_snap(region_id, peer_id, Arc::clone(&status)) {
             Ok(()) => {
+                fail_point!("region_apply_return_not_change_state", |_| { () });
                 status.swap(JOB_STATUS_FINISHED, Ordering::SeqCst);
                 SNAP_COUNTER.apply.success.inc();
                 false

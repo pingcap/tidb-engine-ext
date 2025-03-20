@@ -967,6 +967,7 @@ impl<E: KvEngine> CoprocessorHost<E> {
     }
 
     pub fn on_update_safe_ts(&self, region_id: u64, self_safe_ts: u64, leader_safe_ts: u64) {
+        tikv_util::info!("!!!!! on_update_safe_ts {} {}", self.registry.query_observers.len(), self.registry.update_safe_ts_observers.len());
         if self.registry.query_observers.is_empty() {
             return;
         }

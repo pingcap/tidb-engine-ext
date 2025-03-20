@@ -1418,6 +1418,7 @@ impl RegionReadProgress {
             if !core.pause {
                 self.safe_ts.store(ts, AtomicOrdering::Release);
                 // No need to update leader safe ts here.
+                tikv_util::info!("!!!! safe_ts update_applied");
                 coprocessor.on_update_safe_ts(core.region_id, ts, INVALID_TIMESTAMP)
             }
         }
@@ -1464,6 +1465,7 @@ impl RegionReadProgress {
                 self.safe_ts.store(ts, AtomicOrdering::Release);
                 // After region merge, self safe ts may decrease, so leader safe ts should be
                 // reset.
+                tikv_util::info!("!!!! safe_ts merge_safe_ts");
                 coprocessor.on_update_safe_ts(core.region_id, ts, ts)
             }
         }
@@ -1495,6 +1497,7 @@ impl RegionReadProgress {
                     }
                 }
             }
+            tikv_util::info!("!!!! safe_ts consume_leader_info");
             coprocessor.on_update_safe_ts(leader_info.region_id, self.safe_ts(), rs.get_safe_ts())
         }
         // whether the provided `LeaderInfo` is same as ours
@@ -1704,7 +1707,9 @@ impl RegionReadProgressCore {
         // Consume pending items with `apply_index` less or equal to
         // `self.applied_index`
         let mut to_update = self.read_state.clone();
+        info!("!!!!! update_applied 111");
         while let Some(item) = self.pending_items.pop_front() {
+            info!("!!!!! update_applied 222 {} {}, {} {}", self.applied_index, item.idx, to_update.ts, item.ts);
             if self.applied_index < item.idx {
                 self.pending_items.push_front(item);
                 break;
@@ -1713,6 +1718,7 @@ impl RegionReadProgressCore {
                 to_update = item;
             }
         }
+        info!("!!!!! update_applied 333 {} {}", self.read_state.ts, to_update.ts);
         if self.read_state.ts < to_update.ts {
             self.read_state = to_update;
             Some(self.read_state.ts)

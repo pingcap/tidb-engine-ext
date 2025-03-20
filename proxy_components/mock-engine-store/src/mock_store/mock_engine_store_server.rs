@@ -602,14 +602,20 @@ unsafe extern "C" fn ffi_handle_safe_ts_update(
     self_safe_ts: u64,
     leader_safe_ts: u64,
 ) {
-    info!("ffi_handle_safe_ts_update region_id {}, self_safe_ts {} leader_safe_ts {}", region_id, self_safe_ts, leader_safe_ts);
+    info!(
+        "ffi_handle_safe_ts_update region_id {}, self_safe_ts {} leader_safe_ts {}",
+        region_id, self_safe_ts, leader_safe_ts
+    );
     let store = into_engine_store_server_wrap(arg1);
     let cluster_ext = store.cluster_ext_ptr as *mut mock_cluster::ClusterExt;
     if (*cluster_ext).test_data.expected_self_safe_ts != 0 {
         assert_eq!(self_safe_ts, (*cluster_ext).test_data.expected_self_safe_ts);
     }
     if (*cluster_ext).test_data.expected_leader_safe_ts != 0 {
-        assert_eq!(leader_safe_ts, (*cluster_ext).test_data.expected_leader_safe_ts);
+        assert_eq!(
+            leader_safe_ts,
+            (*cluster_ext).test_data.expected_leader_safe_ts
+        );
     }
     (*cluster_ext).test_data.updated_leader_safe_ts = leader_safe_ts;
     (*cluster_ext).test_data.updated_self_safe_ts = self_safe_ts;

@@ -1,7 +1,8 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use std::sync::Arc;
-use std::cell::RefCell;
-use std::sync::RwLock;
+use std::{
+    cell::RefCell,
+    sync::{Arc, RwLock},
+};
 
 use encryption::DataKeyManager;
 use engine_traits::RaftEngine;
@@ -39,7 +40,9 @@ pub struct TiFlashObserver<T: Transport + 'static, ER: RaftEngine> {
 
 impl<T: Transport + 'static, ER: RaftEngine> TiFlashObserver<T, ER> {
     pub fn new() -> Self {
-        Self { forwarder: Arc::new(RwLock::new(None)) }
+        Self {
+            forwarder: Arc::new(RwLock::new(None)),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -186,8 +189,7 @@ impl<T: Transport + 'static, ER: RaftEngine> QueryObserver for TiFlashObserver<T
 impl<T: Transport + 'static, ER: RaftEngine> UpdateSafeTsObserver for TiFlashObserver<T, ER> {
     fn on_update_safe_ts(&self, region_id: u64, self_safe_ts: u64, leader_safe_ts: u64) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
-            forwarder
-                .on_update_safe_ts(region_id, self_safe_ts, leader_safe_ts)
+            forwarder.on_update_safe_ts(region_id, self_safe_ts, leader_safe_ts)
         }
     }
 }
@@ -212,8 +214,7 @@ impl<T: Transport + 'static, ER: RaftEngine> RegionChangeObserver for TiFlashObs
         cmd: Option<&RaftCmdRequest>,
     ) -> bool {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
-            forwarder
-                .pre_persist(ob_ctx.region(), is_finished, cmd)
+            forwarder.pre_persist(ob_ctx.region(), is_finished, cmd)
         } else {
             true
         }
@@ -256,8 +257,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ApplySnapshotObserver for TiFlashOb
         snap: Option<&store::Snapshot>,
     ) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
-            forwarder
-                .pre_apply_snapshot(ob_ctx.region(), peer_id, snap_key, snap)
+            forwarder.pre_apply_snapshot(ob_ctx.region(), peer_id, snap_key, snap)
         }
     }
 
@@ -269,8 +269,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ApplySnapshotObserver for TiFlashOb
         snap: Option<&store::Snapshot>,
     ) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
-            forwarder
-                .post_apply_snapshot(ob_ctx.region(), peer_id, snap_key, snap)
+            forwarder.post_apply_snapshot(ob_ctx.region(), peer_id, snap_key, snap)
         }
     }
 

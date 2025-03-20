@@ -110,21 +110,27 @@ fn test_safe_ts_basic() {
 fn test_safe_ts_updates() {
     let mut suite = TestSuite::new(1);
 
-    info!("!!!!! test_safe_ts_updates 111 P {} {}", suite.cluster.cluster_ext.test_data.updated_leader_safe_ts, suite.cluster.cluster_ext.test_data.updated_self_safe_ts);
-
     suite.cluster.cluster_ext.test_data.reset();
 
     let states = collect_all_states(&suite.cluster.cluster_ext, 1);
-    let applied_index = states.get(&1).unwrap().in_memory_apply_state.get_applied_index();
+    let applied_index = states
+        .get(&1)
+        .unwrap()
+        .in_memory_apply_state
+        .get_applied_index();
 
     let physical_time = 646454654654;
     suite.must_check_leader(1, TimeStamp::new(physical_time), applied_index + 1, 1);
 
-    assert_ne!(suite.cluster.cluster_ext.test_data.updated_self_safe_ts, physical_time);
+    assert_ne!(
+        suite.cluster.cluster_ext.test_data.updated_self_safe_ts,
+        physical_time
+    );
 
     suite.cluster.must_put(b"k1", b"v1");
 
-    let eng_ids = suite.cluster
+    let eng_ids = suite
+        .cluster
         .engines
         .iter()
         .map(|e| e.0.to_owned())
@@ -139,13 +145,22 @@ fn test_safe_ts_updates() {
         Some(vec![eng_ids[0]]),
     );
 
-    assert_eq!(suite.cluster.cluster_ext.test_data.updated_self_safe_ts, physical_time);
+    assert_eq!(
+        suite.cluster.cluster_ext.test_data.updated_self_safe_ts,
+        physical_time
+    );
 
     let physical_time2 = 666454654654;
     suite.must_check_leader(1, TimeStamp::new(physical_time2), applied_index + 2, 1);
 
-    assert_eq!(suite.cluster.cluster_ext.test_data.updated_self_safe_ts, physical_time);
-    assert_eq!(suite.cluster.cluster_ext.test_data.updated_leader_safe_ts, physical_time2);
+    assert_eq!(
+        suite.cluster.cluster_ext.test_data.updated_self_safe_ts,
+        physical_time
+    );
+    assert_eq!(
+        suite.cluster.cluster_ext.test_data.updated_leader_safe_ts,
+        physical_time2
+    );
 
     suite.cluster.must_put(b"k2", b"v1");
 
@@ -158,8 +173,10 @@ fn test_safe_ts_updates() {
         Some(vec![eng_ids[0]]),
     );
 
-    assert_eq!(suite.cluster.cluster_ext.test_data.updated_self_safe_ts, physical_time2);
-
+    assert_eq!(
+        suite.cluster.cluster_ext.test_data.updated_self_safe_ts,
+        physical_time2
+    );
     suite.stop();
 }
 

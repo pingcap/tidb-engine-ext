@@ -3652,7 +3652,7 @@ where
         apply_metrics: &ApplyMetrics,
     ) -> bool {
         let mut has_ready = false;
-        
+
         if self.is_handling_snapshot() {
             panic!("{} should not applying snapshot.", self.tag);
         }

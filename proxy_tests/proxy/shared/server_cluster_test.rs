@@ -106,6 +106,8 @@ fn test_safe_ts_basic() {
     suite.stop();
 }
 
+const INVALID_TIMESTAMP: u64 = u64::MAX;
+
 #[test]
 fn test_safe_ts_updates() {
     let mut suite = TestSuite::new(1);
@@ -149,6 +151,10 @@ fn test_safe_ts_updates() {
         suite.cluster.cluster_ext.test_data.updated_self_safe_ts,
         physical_time
     );
+    assert_eq!(
+        suite.cluster.cluster_ext.test_data.updated_leader_safe_ts,
+        INVALID_TIMESTAMP
+    );
 
     let physical_time2 = 666454654654;
     suite.must_check_leader(1, TimeStamp::new(physical_time2), applied_index + 2, 1);
@@ -176,6 +182,10 @@ fn test_safe_ts_updates() {
     assert_eq!(
         suite.cluster.cluster_ext.test_data.updated_self_safe_ts,
         physical_time2
+    );
+    assert_eq!(
+        suite.cluster.cluster_ext.test_data.updated_leader_safe_ts,
+        INVALID_TIMESTAMP
     );
     suite.stop();
 }

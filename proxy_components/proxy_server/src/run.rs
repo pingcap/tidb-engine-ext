@@ -17,6 +17,7 @@ use std::{
 
 use api_version::{dispatch_api_version, KvFormat};
 use concurrency_manager::ConcurrencyManager;
+use concurrency_manager::LIMIT_VALID_TIME_MULTIPLIER;
 use encryption_export::data_key_manager_from_config;
 use engine_rocks::{from_rocks_compression_type, RocksEngine, RocksStatistics};
 use engine_rocks_helper::sst_recovery::{RecoveryRunner, DEFAULT_CHECK_INTERVAL};
@@ -761,7 +762,19 @@ impl<ER: RaftEngine, F: KvFormat> TiKvServer<ER, F> {
 
         // Initialize concurrency manager
         let latest_ts = block_on(pd_client.get_tso()).expect("failed to get timestamp from PD");
-        let concurrency_manager = ConcurrencyManager::new(latest_ts);
+        let concurrency_manager = ConcurrencyManager::new_with_config(
+            latest_ts,
+            (config.storage.max_ts.cache_sync_interval * LIMIT_VALID_TIME_MULTIPLIER).into(),
+            config
+                .storage
+                .max_ts
+                .action_on_invalid_update
+                .as_str()
+                .try_into()
+                .unwrap(),
+            Some(pd_client.clone()),
+            config.storage.max_ts.max_drift.0,
+        );
 
         // use different quota for front-end and back-end requests
         let quota_limiter = Arc::new(QuotaLimiter::new(

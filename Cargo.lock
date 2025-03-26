@@ -905,10 +905,12 @@ version = "0.1.0"
 dependencies = [
  "async-compression",
  "async-trait",
+ "base64 0.13.0",
  "chrono",
  "concurrency_manager",
  "crc64fast",
  "dashmap",
+ "derive_more",
  "encryption",
  "encryption_export",
  "engine_panic",
@@ -936,6 +938,8 @@ dependencies = [
  "raftstore",
  "rand 0.8.5",
  "resolved_ts",
+ "serde",
+ "serde_json",
  "slog",
  "slog-global",
  "tempdir",
@@ -1596,6 +1600,7 @@ dependencies = [
  "tracing",
  "tracing-active-tree",
  "txn_types",
+ "uuid 0.8.2",
  "zstd 0.11.2+zstd.1.5.2",
 ]
 
@@ -2195,6 +2200,7 @@ dependencies = [
  "engine_traits",
  "kvproto",
  "raft",
+ "tikv_util",
  "tracker",
  "txn_types",
 ]
@@ -2396,6 +2402,7 @@ dependencies = [
  "log_wrappers",
  "protobuf",
  "raft",
+ "rand 0.8.5",
  "serde",
  "slog",
  "slog-global",
@@ -2548,6 +2555,7 @@ dependencies = [
  "chrono",
  "cloud",
  "encryption",
+ "fail",
  "file_system",
  "futures 0.3.15",
  "futures-io",
@@ -3386,6 +3394,7 @@ checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
 name = "hybrid_engine"
 version = "0.0.1"
 dependencies = [
+ "codec",
  "crossbeam",
  "engine_rocks",
  "engine_traits",
@@ -3397,6 +3406,7 @@ dependencies = [
  "online_config",
  "prometheus",
  "prometheus-static-metric",
+ "protobuf",
  "raft",
  "raftstore",
  "slog",
@@ -3892,7 +3902,7 @@ dependencies = [
 [[package]]
 name = "kvproto"
 version = "0.0.2"
-source = "git+https://github.com/pingcap/kvproto.git#3b77f2c65c635567751d27afd6c58c7958645785"
+source = "git+https://github.com/pingcap/kvproto.git#258e68e813aa1af3a9817ce87630e2ec638851cd"
 dependencies = [
  "futures 0.3.15",
  "grpcio",
@@ -4027,7 +4037,7 @@ dependencies = [
 [[package]]
 name = "librocksdb_sys"
 version = "0.1.0"
-source = "git+https://github.com/tikv/rust-rocksdb.git#19eeae6dc7734af12475fbcf9d368168a0314085"
+source = "git+https://github.com/tikv/rust-rocksdb.git#56f3a91154d91a37eb4508976f8288c1fdec46b2"
 dependencies = [
  "bindgen 0.65.1",
  "bzip2-sys",
@@ -4046,7 +4056,7 @@ dependencies = [
 [[package]]
 name = "libtitan_sys"
 version = "0.0.1"
-source = "git+https://github.com/tikv/rust-rocksdb.git#19eeae6dc7734af12475fbcf9d368168a0314085"
+source = "git+https://github.com/tikv/rust-rocksdb.git#56f3a91154d91a37eb4508976f8288c1fdec46b2"
 dependencies = [
  "bzip2-sys",
  "cc",
@@ -5228,14 +5238,14 @@ version = "0.3.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e30165d31df606f5726b090ec7592c308a0eaf61721ff64c9a3018e344a8753e"
 dependencies = [
- "portable-atomic 1.10.0",
+ "portable-atomic 1.11.0",
 ]
 
 [[package]]
 name = "portable-atomic"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "280dc24453071f1b63954171985a0b0d30058d287960968b9b2aca264c8d4ee6"
+checksum = "350e9b48cbc6b0e028b0473b114454c6316e57336ee184ceab6e53f72c178b3e"
 
 [[package]]
 name = "pprof"
@@ -5744,7 +5754,7 @@ dependencies = [
 [[package]]
 name = "raft"
 version = "0.7.0"
-source = "git+https://github.com/tikv/raft-rs?branch=master#a76fb6ef2cbd002ec10d63a2ac68b4a20b20fe3e"
+source = "git+https://github.com/tikv/raft-rs?branch=master#0d01b20312f74889a5e44ad4180aade5da2f16fa"
 dependencies = [
  "bytes",
  "fxhash",
@@ -5793,7 +5803,7 @@ dependencies = [
 [[package]]
 name = "raft-proto"
 version = "0.7.0"
-source = "git+https://github.com/tikv/raft-rs?branch=master#a76fb6ef2cbd002ec10d63a2ac68b4a20b20fe3e"
+source = "git+https://github.com/tikv/raft-rs?branch=master#0d01b20312f74889a5e44ad4180aade5da2f16fa"
 dependencies = [
  "bytes",
  "protobuf",
@@ -5828,6 +5838,7 @@ dependencies = [
  "bytes",
  "causal_ts",
  "chrono",
+ "codec",
  "collections",
  "concurrency_manager",
  "crc32fast",
@@ -6331,9 +6342,9 @@ checksum = "18eb52b6664d331053136fcac7e4883bdc6f5fc04a6aab3b0f75eafb80ab88b3"
 
 [[package]]
 name = "rgb"
-version = "0.8.32"
+version = "0.8.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e74fdc210d8f24a7dbfedc13b04ba5764f5232754ccebfdf5fff1bad791ccbc6"
+checksum = "57397d16646700483b67d2dd6511d79318f9d057fdbd21a4066aeac8b41d310a"
 dependencies = [
  "bytemuck",
 ]
@@ -6367,7 +6378,7 @@ dependencies = [
 [[package]]
 name = "rocksdb"
 version = "0.3.0"
-source = "git+https://github.com/tikv/rust-rocksdb.git#19eeae6dc7734af12475fbcf9d368168a0314085"
+source = "git+https://github.com/tikv/rust-rocksdb.git#56f3a91154d91a37eb4508976f8288c1fdec46b2"
 dependencies = [
  "libc 0.2.151",
  "librocksdb_sys",
@@ -7851,6 +7862,7 @@ dependencies = [
  "bstr",
  "byteorder",
  "chrono",
+ "chrono-tz",
  "codec",
  "crypto",
  "file_system",
@@ -7882,7 +7894,7 @@ dependencies = [
 
 [[package]]
 name = "tikv"
-version = "9.0.0-alpha"
+version = "9.0.0-beta.1"
 dependencies = [
  "anyhow",
  "api_version",

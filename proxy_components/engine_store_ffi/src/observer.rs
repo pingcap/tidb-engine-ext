@@ -1,7 +1,5 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 
 use encryption::DataKeyManager;
 use engine_traits::RaftEngine;

@@ -301,7 +301,7 @@ impl ServerCluster {
         // Create coprocessor.
         let mut coprocessor_host = CoprocessorHost::new(router.clone(), cfg.coprocessor.clone());
 
-        let mut tiflash_ob = engine_store_ffi::observer::TiFlashObserver::new();
+        let mut tiflash_ob = engine_store_ffi::observer::TiFlashObserver::default();
         tiflash_ob.register_to(&mut coprocessor_host);
 
         let local_reader = LocalReader::new(

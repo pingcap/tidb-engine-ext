@@ -1284,7 +1284,7 @@ impl<ER: RaftEngine, F: KvFormat> TiKvServer<ER, F> {
         let importer = Arc::new(importer);
 
         // Must be registered before `CheckLeaderRunner`, to get safe_ts updates.
-        let mut tiflash_ob = engine_store_ffi::observer::TiFlashObserver::new();
+        let mut tiflash_ob = engine_store_ffi::observer::TiFlashObserver::default();
         tiflash_ob.register_to(self.coprocessor_host.as_mut().unwrap());
 
         let check_leader_runner = CheckLeaderRunner::new(

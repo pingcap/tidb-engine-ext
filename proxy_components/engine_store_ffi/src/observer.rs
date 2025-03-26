@@ -35,13 +35,15 @@ pub struct TiFlashObserver<T: Transport + 'static, ER: RaftEngine> {
     pub forwarder: Arc<RwLock<Option<ProxyForwarder<T, ER>>>>,
 }
 
-impl<T: Transport + 'static, ER: RaftEngine> TiFlashObserver<T, ER> {
-    pub fn new() -> Self {
+impl<T: Transport + 'static, ER: RaftEngine> Default for TiFlashObserver<T, ER> {
+    fn default() -> Self {
         Self {
             forwarder: Arc::new(RwLock::new(None)),
         }
     }
+}
 
+impl<T: Transport + 'static, ER: RaftEngine> TiFlashObserver<T, ER> {
     #[allow(clippy::too_many_arguments)]
     pub fn init_forwarder(
         &mut self,

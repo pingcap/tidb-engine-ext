@@ -348,7 +348,7 @@ impl Simulator<TiFlashEngine> for NodeCluster {
             pd_endpoints: cfg.pd.endpoints.clone(),
             snap_handle_pool_size: cfg.proxy_cfg.raft_store.snap_handle_pool_size,
         };
-        let mut tiflash_ob = engine_store_ffi::observer::TiFlashObserver::new();
+        let mut tiflash_ob = engine_store_ffi::observer::TiFlashObserver::default();
         tiflash_ob.init_forwarder(
             node_id,
             engines.kv.clone(),

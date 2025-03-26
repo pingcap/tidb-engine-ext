@@ -2,9 +2,9 @@
 #![allow(unreachable_code)]
 #![allow(unused_variables)]
 use engine_traits::{ImportExt, IngestExternalFileOptions, Range, Result};
+use fail::fail_point;
 use rocksdb::IngestExternalFileOptions as RawIngestExternalFileOptions;
 use tikv_util::{range_latch::RangeLatchGuard, time::Instant};
-use fail::fail_point;
 
 use crate::{
     engine::RocksEngine, perf_context_metrics::INGEST_EXTERNAL_FILE_TIME_HISTOGRAM, r2e, util,
@@ -13,7 +13,12 @@ use crate::{
 impl ImportExt for RocksEngine {
     type IngestExternalFileOptions = RocksIngestExternalFileOptions;
 
-    fn ingest_external_file_cf(&self, cf_name: &str, files: &[&str], range: Option<Range<'_>>,) -> Result<()> {
+    fn ingest_external_file_cf(
+        &self,
+        cf_name: &str,
+        files: &[&str],
+        range: Option<Range<'_>>,
+    ) -> Result<()> {
         // do nothing
         return Ok(());
 
@@ -48,7 +53,8 @@ impl ImportExt for RocksEngine {
     }
 
     fn acquire_ingest_latch(&self, range: Range<'_>) -> RangeLatchGuard<'_> {
-        self.rocks.ingest_latch
+        self.rocks
+            .ingest_latch
             .acquire(range.start_key.to_vec(), range.end_key.to_vec())
     }
 }
@@ -63,7 +69,7 @@ impl IngestExternalFileOptions for RocksIngestExternalFileOptions {
     fn move_files(&mut self, f: bool) {
         self.0.move_files(f);
     }
-    
+
     fn allow_write(&mut self, f: bool) {
         self.0.set_allow_write(f);
     }

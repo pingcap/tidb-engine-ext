@@ -130,6 +130,7 @@ impl<T: Transport + 'static, ER: RaftEngine> AdminObserver for TiFlashObserver<T
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.pre_exec_admin(ob_ctx.region(), req, index, term)
         } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
             false
         }
     }
@@ -151,6 +152,7 @@ impl<T: Transport + 'static, ER: RaftEngine> AdminObserver for TiFlashObserver<T
                 apply_ctx_info,
             )
         } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
             false
         }
     }
@@ -160,6 +162,8 @@ impl<T: Transport + 'static, ER: RaftEngine> QueryObserver for TiFlashObserver<T
     fn on_empty_cmd(&self, ob_ctx: &mut ObserverContext<'_>, index: u64, term: u64) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.on_empty_cmd(ob_ctx.region(), index, term)
+        } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
         }
     }
 
@@ -180,6 +184,7 @@ impl<T: Transport + 'static, ER: RaftEngine> QueryObserver for TiFlashObserver<T
                 apply_ctx_info,
             )
         } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
             false
         }
     }
@@ -189,6 +194,8 @@ impl<T: Transport + 'static, ER: RaftEngine> UpdateSafeTsObserver for TiFlashObs
     fn on_update_safe_ts(&self, region_id: u64, self_safe_ts: u64, leader_safe_ts: u64) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.on_update_safe_ts(region_id, self_safe_ts, leader_safe_ts)
+        } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
         }
     }
 }
@@ -202,6 +209,8 @@ impl<T: Transport + 'static, ER: RaftEngine> RegionChangeObserver for TiFlashObs
     ) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.on_region_changed(ob_ctx.region(), e, r)
+        } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
         }
     }
 
@@ -215,6 +224,7 @@ impl<T: Transport + 'static, ER: RaftEngine> RegionChangeObserver for TiFlashObs
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.pre_persist(ob_ctx.region(), is_finished, cmd)
         } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
             true
         }
     }
@@ -223,6 +233,7 @@ impl<T: Transport + 'static, ER: RaftEngine> RegionChangeObserver for TiFlashObs
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.pre_write_apply_state(ob_ctx.region())
         } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
             true
         }
     }
@@ -233,6 +244,7 @@ impl<T: Transport + 'static, ER: RaftEngine> RaftMessageObserver for TiFlashObse
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.on_raft_message(msg)
         } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
             true
         }
     }
@@ -242,6 +254,8 @@ impl<T: Transport + 'static, ER: RaftEngine> PdTaskObserver for TiFlashObserver<
     fn on_compute_engine_size(&self, store_size: &mut Option<StoreSizeInfo>) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.on_compute_engine_size(store_size)
+        } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
         }
     }
 }
@@ -257,6 +271,8 @@ impl<T: Transport + 'static, ER: RaftEngine> ApplySnapshotObserver for TiFlashOb
     ) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.pre_apply_snapshot(ob_ctx.region(), peer_id, snap_key, snap)
+        } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
         }
     }
 
@@ -269,6 +285,8 @@ impl<T: Transport + 'static, ER: RaftEngine> ApplySnapshotObserver for TiFlashOb
     ) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.post_apply_snapshot(ob_ctx.region(), peer_id, snap_key, snap)
+        } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
         }
     }
 
@@ -276,6 +294,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ApplySnapshotObserver for TiFlashOb
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.should_pre_apply_snapshot()
         } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
             false
         }
     }
@@ -283,6 +302,8 @@ impl<T: Transport + 'static, ER: RaftEngine> ApplySnapshotObserver for TiFlashOb
     fn cancel_apply_snapshot(&self, region_id: u64, peer_id: u64) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.cancel_apply_snapshot(region_id, peer_id)
+        } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
         }
     }
 }
@@ -291,6 +312,8 @@ impl<T: Transport + 'static, ER: RaftEngine> RoleObserver for TiFlashObserver<T,
     fn on_role_change(&self, ob_ctx: &mut ObserverContext<'_>, r: &RoleChange) {
         if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
             forwarder.on_role_change(ob_ctx.region(), r)
+        } else {
+            warn!("TiFlashObserver called before forwarder is initialized");
         }
     }
 }

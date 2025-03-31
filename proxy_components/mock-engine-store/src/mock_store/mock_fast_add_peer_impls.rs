@@ -88,7 +88,7 @@ pub(crate) unsafe extern "C" fn ffi_apply_fap_snapshot(
         if let Some(target_region) = (*store.engine_store_server).kvstore.get_mut(&region_id) {
             if target_region.apply_state.get_applied_index() != index {
                 panic!(
-                    "don't support FAP for an existing region region_id={} peed_id={} snap_index={} index={}",
+                    "Don't support FAP for an existing region region_id={} peed_id={} snap_index={} index={}",
                     region_id,
                     peer_id,
                     index,
@@ -111,6 +111,11 @@ pub(crate) unsafe extern "C" fn ffi_apply_fap_snapshot(
             return 0;
         }
     };
+    info!("fap snapshot: insert into kvstore";
+        "region_id" => region_id,
+        "peer_id" => peer_id,
+        "assert_exist" => assert_exist,
+    );
     (*store.engine_store_server)
         .kvstore
         .insert(region_id, new_region);
@@ -173,6 +178,13 @@ pub(crate) unsafe extern "C" fn ffi_fast_add_peer(
     })() != 0;
     let fail_after_write: bool = (|| {
         fail::fail_point!("fap_mock_fail_after_write", |t| {
+            let t = t.unwrap().parse::<u64>().unwrap();
+            t
+        });
+        0
+    })() != 0;
+    let fail_after_write_mismatch: bool = (|| {
+        fail::fail_point!("fap_mock_fail_after_write_mismatch", |t| {
             let t = t.unwrap().parse::<u64>().unwrap();
             t
         });
@@ -267,7 +279,7 @@ pub(crate) unsafe extern "C" fn ffi_fast_add_peer(
             debug!("recover from remote peer: meta from {} to {}", from_store, store_id; "region_id" => region_id);
             // Must first dump meta then data, otherwise data may lag behind.
             // We can see a raft log hole at applied_index otherwise.
-            let apply_state: RaftApplyState = match general_get_apply_state(
+            let mut apply_state: RaftApplyState = match general_get_apply_state(
                 &source_engines.kv,
                 region_id,
             ) {
@@ -278,6 +290,9 @@ pub(crate) unsafe extern "C" fn ffi_fast_add_peer(
                     return;
                 }
             };
+            if fail_after_write_mismatch {
+                apply_state.set_applied_index(apply_state.get_applied_index() - 1);
+            }
             new_region.set_applied(apply_state.get_applied_index(), source_region.applied_term);
             debug!("recover from remote peer: begin data from {} to {}", from_store, store_id; 
                 "region_id" => region_id,
@@ -295,7 +310,7 @@ pub(crate) unsafe extern "C" fn ffi_fast_add_peer(
                 return;
             }
 
-            if fail_after_write {
+            if fail_after_write || fail_after_write_mismatch {
                 let mut raft_wb = target_engines.raft.log_batch(1024);
                 let mut entries: Vec<raft::eraftpb::Entry> = Default::default();
                 target_engines
@@ -316,6 +331,7 @@ pub(crate) unsafe extern "C" fn ffi_fast_add_peer(
                 target_engines.raft.gc(region_id, from, to, &mut raft_wb).unwrap();
                 target_engines.raft.consume(&mut raft_wb, true).unwrap();
             }
+
             let apply_state_bytes = apply_state.write_to_bytes().unwrap();
             let region_bytes = region_local_state.get_region().write_to_bytes().unwrap();
             let apply_state_ptr = create_cpp_str(Some(apply_state_bytes));

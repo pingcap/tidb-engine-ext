@@ -122,6 +122,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
                     "current_enabled" => current_enabled,
                     "tag" => tag
                 );
+                fail::fail_point!("fap_core_must_shared_snapshot", |_| { return false });
                 if expected_snapshot_type == SnapshotDeducedType::Fap {
                     // It won't actually happen because TiFlash will panic since `assert_exist` is
                     // true in this case.
@@ -163,6 +164,8 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
             ) {
                 return quit_apply_fap("apply");
             }
+
+            fail::fail_point!("fap_core_must_not_shared_snapshot", |_| { return false });
             // If it's a reguar snapshot have the same (index, term) as the fap snapshot,
             // it make no difference which snapshot we actually applied.
             // So we always choose to apply a fap snapshot, since it saves as from

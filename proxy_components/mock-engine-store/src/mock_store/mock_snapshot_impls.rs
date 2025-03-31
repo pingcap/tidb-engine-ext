@@ -166,6 +166,10 @@ pub unsafe extern "C" fn ffi_apply_pre_handled_snapshot(
         .tmp_fap_regions
         .remove(&region_id);
 
+    info!("normal snapshot: insert into kvstore";
+        "region_id" => region_id,
+        "node_id" => node_id,
+    );
     let _ = &(*store.engine_store_server)
         .kvstore
         .insert(region_id, Box::new(region_meta.region.take().unwrap()));

@@ -122,6 +122,10 @@ impl EngineStoreServerWrap {
                                 let new_region =
                                     make_new_region(Some(region_meta.clone()), Some(node_id));
 
+                                info!("batch split: insert into kvstore";
+                                    "region_id" => region_id,
+                                    "node_id" => node_id,
+                                );
                                 // No need to split data because all KV are stored in the same
                                 // RocksDB. TODO But we still need
                                 // to clean all in-memory data.
@@ -143,6 +147,12 @@ impl EngineStoreServerWrap {
                         let tikv_region = resp.get_split().get_left();
 
                         let _target = req.prepare_merge.as_ref().unwrap().target.as_ref();
+
+                        info!("merge: insert into kvstore";
+                            "region_id" => region_id,
+                            "node_id" => node_id,
+                        );
+
                         let region_meta = &mut (engine_store_server
                             .kvstore
                             .get_mut(&region_id)
@@ -279,7 +289,10 @@ impl EngineStoreServerWrap {
                 // Currently in tests, we don't handle commands like BatchSplit,
                 // and sometimes we don't bootstrap region 1,
                 // so it is normal if we find no region.
-                warn!("region {} not found, create for {}", region_id, node_id);
+                warn!(
+                    "region {} not found, create for {}, insert into kvstore",
+                    region_id, node_id
+                );
                 let new_region = v.insert(Default::default());
                 assert!((*self.engine_store_server).kvstore.contains_key(&region_id));
                 do_handle_admin_raft_cmd(new_region, &mut (*self.engine_store_server))

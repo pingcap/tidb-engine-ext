@@ -639,7 +639,7 @@ where
         let apply_state = self.apply_state(*region_id)?;
 
         check_abort(&abort)?;
-        
+
         let term = apply_state.get_truncated_state().get_term();
         let idx = apply_state.get_truncated_state().get_index();
         let snap_key = SnapKey::new(*region_id, term, idx);

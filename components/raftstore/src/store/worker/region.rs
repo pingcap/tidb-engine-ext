@@ -340,7 +340,6 @@ where
         if !s.exists() {
             return Err(box_err!("missing snapshot file {}", s.path()));
         }
-
         check_abort(&abort)?;
         let timer = Instant::now();
         let options = ApplyOptions {
@@ -351,7 +350,6 @@ where
             coprocessor_host: self.coprocessor_host.clone(),
             ingest_copy_symlink: self.ingest_copy_symlink,
         };
-
         s.apply(options)?;
         self.coprocessor_host
             .post_apply_snapshot(&region, peer_id, &snap_key, Some(&s));
@@ -639,7 +637,9 @@ where
 
         let region_state = self.region_state(*region_id)?;
         let apply_state = self.apply_state(*region_id)?;
+
         check_abort(&abort)?;
+        
         let term = apply_state.get_truncated_state().get_term();
         let idx = apply_state.get_truncated_state().get_index();
         let snap_key = SnapKey::new(*region_id, term, idx);

@@ -373,10 +373,6 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
         fail::fail_point!("on_ob_apply_snapshot_committed", |_| {
             return;
         });
-        info!("!!!!! @@@@@@remove fap snapshot on success";
-            "peer_id" => peer_id,
-            "region_id" => region.get_id(),
-        );
         #[allow(unused_mut)]
         let mut should_check_fap_snapshot = self.packed_envs.engine_store_cfg.enable_unips;
         #[allow(clippy::redundant_closure_call)]
@@ -387,10 +383,6 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
             });
         })();
         if should_check_fap_snapshot {
-            info!("!!!!! @@@@@@remove fap snapshot on success 222";
-                "peer_id" => peer_id,
-                "region_id" => region.get_id(),
-            );
             if self.engine_store_server_helper.query_fap_snapshot_state(
                 region.get_id(),
                 peer_id,

@@ -313,7 +313,6 @@ impl ServerCluster {
             } else {
                 Arc::new(|| false)
             };
-        let mut coprocessor_host = CoprocessorHost::new(router.clone(), cfg.coprocessor.clone());
         let region_info_accessor =
             RegionInfoAccessor::new(&mut coprocessor_host, enable_region_stats_mgr_cb);
 

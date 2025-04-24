@@ -293,6 +293,13 @@ impl ServerCluster {
         }
 
         let key_mgr_cloned = key_manager.clone();
+
+        // Create coprocessor.
+        let mut coprocessor_host = CoprocessorHost::new(router.clone(), cfg.coprocessor.clone());
+
+        let mut tiflash_ob = engine_store_ffi::observer::TiFlashObserver::default();
+        tiflash_ob.register_to(&mut coprocessor_host);
+
         let local_reader = LocalReader::new(
             engines.kv.clone(),
             StoreMetaDelegate::new(store_meta.clone(), engines.kv.clone()),
@@ -306,7 +313,6 @@ impl ServerCluster {
             } else {
                 Arc::new(|| false)
             };
-        let mut coprocessor_host = CoprocessorHost::new(router.clone(), cfg.coprocessor.clone());
         let region_info_accessor =
             RegionInfoAccessor::new(&mut coprocessor_host, enable_region_stats_mgr_cb);
 
@@ -556,8 +562,7 @@ impl ServerCluster {
         let mut server = server.unwrap();
         let addr = server.listening_addr();
         cfg.server.addr = format!("{}", addr);
-        let trans = server.transport();
-        let simulate_trans = SimulateTransport::new(trans);
+        let simulate_trans = SimulateTransport::new(server.transport());
         let max_grpc_thread_count = cfg.server.grpc_concurrency;
         let server_cfg = Arc::new(VersionTrack::new(cfg.server.clone()));
 
@@ -566,7 +571,7 @@ impl ServerCluster {
             pd_endpoints: cfg.pd.endpoints.clone(),
             snap_handle_pool_size: cfg.proxy_cfg.raft_store.snap_handle_pool_size,
         };
-        let tiflash_ob = engine_store_ffi::observer::TiFlashObserver::new(
+        tiflash_ob.init_forwarder(
             node_id,
             engines.kv.clone(),
             engines.raft.clone(),
@@ -577,7 +582,6 @@ impl ServerCluster {
             DebugStruct::default(),
             key_mgr_cloned,
         );
-        tiflash_ob.register_to(&mut coprocessor_host);
         engines
             .kv
             .proxy_ext

@@ -58,6 +58,7 @@ fn simple_fast_add_peer(
     tikv_util::set_panic_hook(true, "./");
     let (mut cluster, pd_client) = new_mock_cluster(0, 3);
     fail::cfg("post_apply_snapshot_allow_no_unips", "return").unwrap();
+    fail::cfg("on_apply_snapshot_committed_allow_no_unips", "return").unwrap();
     cluster.cfg.proxy_cfg.engine_store.enable_fast_add_peer = true;
     if !check_timeout {
         fail::cfg("fap_core_fallback_millis", "return(1000000)").unwrap();

@@ -1211,6 +1211,7 @@ fn test_replay_fap_before_post_apply() {
     cluster.shutdown();
 }
 
+// TODO This test can work if we support `return` in region_apply_return_not_change_state.
 // #[test]
 fn test_replay_fap_before_write() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 2);

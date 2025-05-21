@@ -12,6 +12,7 @@ mod actions;
 mod latch;
 mod store;
 mod task;
+mod tracker;
 
 use std::{error::Error as StdError, io::Error as IoError};
 
@@ -273,6 +274,7 @@ pub mod tests {
             must_succeed_on_region as must_commit_on_region,
         },
         gc::tests::must_succeed as must_gc,
+        mvcc::tests::must_find_mvcc_infos,
         prewrite::tests::{
             try_pessimistic_prewrite_check_not_exists, try_prewrite_check_not_exists,
             try_prewrite_insert,

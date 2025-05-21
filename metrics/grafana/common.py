@@ -36,6 +36,8 @@ DATASOURCE_INPUT = DataSourceInput(
 )
 DATASOURCE = f"${{{DATASOURCE_INPUT.name}}}"
 ADDITIONAL_GROUPBY = "$additional_groupby"
+OPTIONAL_QUANTILE = "optional_quantile"
+OPTIONAL_QUANTILE_INPUT = "$" + OPTIONAL_QUANTILE
 
 
 @attr.s
@@ -492,7 +494,7 @@ def expr_count_rate(
 
     count(rate(
         tikv_thread_cpu_seconds_total
-        {k8s_cluster="$k8s_cluster",tidb_cluster="$tidb_cluster",instance=~"$instance",name=~"sst_.*"}
+        {k8s_cluster="$k8s_cluster",tidb_cluster="$tidb_cluster",instance=~"$instance",name=~"(sst_|impwkr).*"}
         [$__rate_interval]
     )) by (instance)
     """
@@ -537,6 +539,7 @@ def expr_histogram_quantile(
     metrics: str,
     label_selectors: list[str] = [],
     by_labels: list[str] = [],
+    is_optional_quantile=False,
 ) -> Expr:
     """
     Query a quantile of a histogram metric.
@@ -560,10 +563,13 @@ def expr_histogram_quantile(
         by_labels=by_labels + ["le"],
     )
     # histogram_quantile({quantile}, {sum_rate_of_buckets})
+    quantile_str = f"{quantile}"
+    if is_optional_quantile:
+        quantile_str = OPTIONAL_QUANTILE_INPUT
     return expr_aggr(
         metric=sum_rate_of_buckets,
         aggr_op="histogram_quantile",
-        aggr_param=f"{quantile}",
+        aggr_param=quantile_str,
         label_selectors=[],
         by_labels=[],
     ).extra(

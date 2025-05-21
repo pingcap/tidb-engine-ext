@@ -1,7 +1,7 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 // #[PerformanceCriticalPath] called by Fsm on_ready_compute_hash
-use std::{borrow::Cow, marker::PhantomData, mem, ops::Deref};
+use std::{borrow::Cow, marker::PhantomData, mem, ops::Deref, option::Option::Some};
 
 use engine_traits::{CfName, KvEngine, WriteBatch};
 use kvproto::{
@@ -296,11 +296,6 @@ impl_box_observer!(
     WrappedRaftMessageObserver
 );
 impl_box_observer!(
-    BoxExtraMessageObserver,
-    ExtraMessageObserver,
-    WrappedExtraMessageObserver
-);
-impl_box_observer!(
     BoxRegionHeartbeatObserver,
     RegionHeartbeatObserver,
     WrappedRegionHeartbeatObserver
@@ -319,6 +314,11 @@ impl_box_observer!(
     BoxDestroyPeerObserver,
     DestroyPeerObserver,
     WrappedBoxDestroyPeerObserver
+);
+impl_box_observer!(
+    BoxTransferLeaderObserver,
+    TransferLeaderObserver,
+    WrappedBoxTransferLeaderObserver
 );
 
 /// Registry contains all registered coprocessors.
@@ -339,9 +339,9 @@ where
     pd_task_observers: Vec<Entry<BoxPdTaskObserver>>,
     update_safe_ts_observers: Vec<Entry<BoxUpdateSafeTsObserver>>,
     raft_message_observers: Vec<Entry<BoxRaftMessageObserver>>,
-    extra_message_observers: Vec<Entry<BoxExtraMessageObserver>>,
     region_heartbeat_observers: Vec<Entry<BoxRegionHeartbeatObserver>>,
     destroy_peer_observers: Vec<Entry<BoxDestroyPeerObserver>>,
+    transfer_leader_observers: Vec<Entry<BoxTransferLeaderObserver>>,
     // For now, `write_batch_observer` and `snapshot_observer` can only have one
     // observer solely because of simplicity. However, it is possible to have
     // multiple observers in the future if needed.
@@ -365,9 +365,9 @@ impl<E: KvEngine> Default for Registry<E> {
             pd_task_observers: Default::default(),
             update_safe_ts_observers: Default::default(),
             raft_message_observers: Default::default(),
-            extra_message_observers: Default::default(),
             region_heartbeat_observers: Default::default(),
             destroy_peer_observers: Default::default(),
+            transfer_leader_observers: Default::default(),
             write_batch_observer: None,
             snapshot_observer: None,
         }
@@ -443,10 +443,6 @@ impl<E: KvEngine> Registry<E> {
         push!(priority, qo, self.raft_message_observers);
     }
 
-    pub fn register_extra_message_observer(&mut self, priority: u32, qo: BoxExtraMessageObserver) {
-        push!(priority, qo, self.extra_message_observers);
-    }
-
     pub fn register_region_heartbeat_observer(
         &mut self,
         priority: u32,
@@ -461,6 +457,18 @@ impl<E: KvEngine> Registry<E> {
         destroy_peer_observer: BoxDestroyPeerObserver,
     ) {
         push!(priority, destroy_peer_observer, self.destroy_peer_observers);
+    }
+
+    pub fn register_transfer_leader_observer(
+        &mut self,
+        priority: u32,
+        transfer_leader_observer: BoxTransferLeaderObserver,
+    ) {
+        push!(
+            priority,
+            transfer_leader_observer,
+            self.transfer_leader_observers
+        );
     }
 
     pub fn register_write_batch_observer(&mut self, write_batch_observer: BoxWriteBatchObserver) {
@@ -759,18 +767,35 @@ impl<E: KvEngine> CoprocessorHost<E> {
         &self,
         r: &Region,
         tr: &TransferLeaderRequest,
-    ) -> Result<Vec<ExtraMessage>> {
+    ) -> Result<Vec<TransferLeaderCustomContext>> {
         let mut ctx = ObserverContext::new(r);
-        let mut msgs = vec![];
-        for o in &self.registry.admin_observers {
-            if let Some(msg) = (o.observer).inner().pre_transfer_leader(&mut ctx, tr)? {
-                msgs.push(msg);
+        let mut custom_ctx = vec![];
+        for o in &self.registry.transfer_leader_observers {
+            if let Some(cctx) = (o.observer).inner().pre_transfer_leader(&mut ctx, tr)? {
+                custom_ctx.push(cctx);
             }
             if ctx.bypass {
                 break;
             }
         }
-        Ok(msgs)
+        Ok(custom_ctx)
+    }
+
+    pub fn pre_ack_transfer_leader(&self, r: &Region, msg: &eraftpb::Message) -> bool {
+        assert!(
+            msg.get_msg_type() == eraftpb::MessageType::MsgTransferLeader,
+            "unexpected message type {:?}",
+            msg,
+        );
+        let mut ctx = ObserverContext::new(r);
+        let mut ready = true;
+        for o in &self.registry.transfer_leader_observers {
+            ready &= (o.observer).inner().pre_ack_transfer_leader(&mut ctx, msg);
+            if ctx.bypass {
+                break;
+            }
+        }
+        ready
     }
 
     pub fn post_apply_snapshot(
@@ -928,13 +953,6 @@ impl<E: KvEngine> CoprocessorHost<E> {
         true
     }
 
-    pub fn on_extra_message(&self, r: &Region, msg: &ExtraMessage) {
-        for observer in &self.registry.extra_message_observers {
-            let observer = observer.observer.inner();
-            observer.on_extra_message(r, msg);
-        }
-    }
-
     /// Returns false if the message should not be stepped later.
     pub fn on_raft_message(&self, msg: &RaftMessage) -> bool {
         for observer in &self.registry.raft_message_observers {
@@ -974,9 +992,18 @@ impl<E: KvEngine> CoprocessorHost<E> {
         }
     }
 
-    pub fn on_step_read_index(&self, msg: &mut eraftpb::Message, role: StateRole) {
+    pub fn on_step_read_index(
+        &self,
+        msg: &mut eraftpb::Message,
+        role: StateRole,
+        region_start_key: Option<&[u8]>,
+        region_end_key: Option<&[u8]>,
+    ) {
         for step_ob in &self.registry.read_index_observers {
-            step_ob.observer.inner().on_step(msg, role);
+            step_ob
+                .observer
+                .inner()
+                .on_step(msg, role, region_start_key, region_end_key);
         }
     }
 
@@ -1083,6 +1110,7 @@ mod tests {
         PreWriteApplyState = 25,
         OnRaftMessage = 26,
         CancelApplySnapshot = 27,
+        ApplySnapshotCommitted = 28,
     }
 
     impl Coprocessor for TestCoprocessor {}
@@ -1308,6 +1336,19 @@ mod tests {
                 Ordering::SeqCst,
             );
         }
+
+        fn on_apply_snapshot_committed(
+            &self,
+            _: &mut ObserverContext<'_>,
+            _: u64,
+            _: &crate::store::SnapKey,
+            _: Option<&crate::store::Snapshot>,
+        ) {
+            self.called.fetch_add(
+                ObserverIndex::ApplySnapshotCommitted as usize,
+                Ordering::SeqCst,
+            );
+        }
     }
 
     impl CmdObserver<PanicEngine> for TestCoprocessor {
@@ -1500,6 +1541,15 @@ mod tests {
 
         host.cancel_apply_snapshot(region.get_id(), 0);
         index += ObserverIndex::CancelApplySnapshot as usize;
+        assert_all!([&ob.called], &[index]);
+
+        let sk = SnapKey {
+            region_id: region.get_id(),
+            term: 0,
+            idx: 0,
+        };
+        host.on_apply_snapshot_committed(&region, 0, &sk, None);
+        index += ObserverIndex::ApplySnapshotCommitted as usize;
         assert_all!([&ob.called], &[index]);
     }
 

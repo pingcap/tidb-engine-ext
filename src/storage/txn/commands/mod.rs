@@ -64,7 +64,7 @@ pub use rollback::Rollback;
 use tikv_util::{deadline::Deadline, memory::HeapSize};
 use tracker::RequestType;
 pub use txn_heart_beat::TxnHeartBeat;
-use txn_types::{Key, TimeStamp, Value, Write};
+use txn_types::{CommitRole as TxnCommitRole, Key, TimeStamp};
 
 use crate::storage::{
     kv::WriteData,
@@ -73,7 +73,7 @@ use crate::storage::{
         WaitTimeout,
     },
     metrics,
-    mvcc::{Lock as MvccLock, MvccReader, ReleasedLock, SnapshotReader},
+    mvcc::{ReleasedLock, SnapshotReader},
     txn::{latch, txn_status_cache::TxnStatusCache, ProcessResult, Result},
     types::{
         MvccInfo, PessimisticLockParameters, PessimisticLockResults, PrewriteResult,
@@ -256,6 +256,11 @@ impl From<CommitRequest> for TypedCommand<TxnStatus> {
             keys,
             req.get_start_version().into(),
             req.get_commit_version().into(),
+            match req.get_commit_role() {
+                CommitRole::Unknown => None,
+                CommitRole::Primary => Some(TxnCommitRole::Primary),
+                CommitRole::Secondary => Some(TxnCommitRole::Secondary),
+            },
             req.take_context(),
         )
     }
@@ -559,39 +564,6 @@ impl ReleasedLocks {
     pub fn into_iter(self) -> impl Iterator<Item = ReleasedLock> {
         self.0.into_iter()
     }
-}
-
-type LockWritesVals = (
-    Option<MvccLock>,
-    Vec<(TimeStamp, Write)>,
-    Vec<(TimeStamp, Value)>,
-);
-
-fn find_mvcc_infos_by_key<S: Snapshot>(
-    reader: &mut MvccReader<S>,
-    key: &Key,
-    mut ts: TimeStamp,
-) -> Result<LockWritesVals> {
-    let mut writes = vec![];
-    let mut values = vec![];
-    let lock = reader.load_lock(key)?;
-    loop {
-        let opt = reader.seek_write(key, ts)?;
-        match opt {
-            Some((commit_ts, write)) => {
-                writes.push((commit_ts, write));
-                if commit_ts.is_zero() {
-                    break;
-                }
-                ts = commit_ts.prev();
-            }
-            None => break,
-        };
-    }
-    for (ts, v) in reader.scan_values_in_default(key)? {
-        values.push((ts, v));
-    }
-    Ok((lock, writes, values))
 }
 
 pub trait CommandExt: Display {
@@ -961,7 +933,7 @@ pub mod test_util {
         start_ts: u64,
         one_pc_max_commit_ts: Option<u64>,
     ) -> Result<PrewriteResult> {
-        let cm = ConcurrencyManager::new(start_ts.into());
+        let cm = ConcurrencyManager::new_for_test(start_ts.into());
         prewrite_with_cm(
             engine,
             cm,
@@ -1004,7 +976,7 @@ pub mod test_util {
         for_update_ts: u64,
         one_pc_max_commit_ts: Option<u64>,
     ) -> Result<PrewriteResult> {
-        let cm = ConcurrencyManager::new(start_ts.into());
+        let cm = ConcurrencyManager::new_for_test(start_ts.into());
         pessimistic_prewrite_with_cm(
             engine,
             cm,
@@ -1064,7 +1036,7 @@ pub mod test_util {
                 .into_iter()
                 .map(|(size, ts)| (size, TimeStamp::from(ts))),
         );
-        let cm = ConcurrencyManager::new(start_ts.into());
+        let cm = ConcurrencyManager::new_for_test(start_ts.into());
         prewrite_command(engine, cm, statistics, cmd)
     }
 
@@ -1077,11 +1049,12 @@ pub mod test_util {
     ) -> Result<()> {
         let ctx = Context::default();
         let snap = engine.snapshot(Default::default())?;
-        let concurrency_manager = ConcurrencyManager::new(lock_ts.into());
+        let concurrency_manager = ConcurrencyManager::new_for_test(lock_ts.into());
         let cmd = Commit::new(
             keys,
             TimeStamp::from(lock_ts),
             TimeStamp::from(commit_ts),
+            None,
             ctx,
         );
 
@@ -1109,7 +1082,7 @@ pub mod test_util {
     ) -> Result<()> {
         let ctx = Context::default();
         let snap = engine.snapshot(Default::default())?;
-        let concurrency_manager = ConcurrencyManager::new(start_ts.into());
+        let concurrency_manager = ConcurrencyManager::new_for_test(start_ts.into());
         let cmd = Rollback::new(keys, TimeStamp::from(start_ts), ctx);
         let context = WriteContext {
             lock_mgr: &MockLockManager::new(),
@@ -1134,6 +1107,54 @@ pub mod test_util {
             Some(Arc::new(test_provider))
         } else {
             None
+        }
+    }
+
+    pub fn pessimistic_lock<E: Engine>(
+        engine: &mut E,
+        statistics: &mut Statistics,
+        keys: Vec<(&[u8], bool)>,
+        primary: Vec<u8>,
+        start_ts: u64,
+        for_update_ts: u64,
+        return_values: bool,
+    ) -> PessimisticLockResults {
+        let ctx = Context::default();
+        let snap = engine.snapshot(Default::default()).unwrap();
+        let concurrency_manager = ConcurrencyManager::new_for_test(start_ts.into());
+        let cmd = AcquirePessimisticLock::new(
+            keys.into_iter()
+                .map(|key| (Key::from_raw(key.0), key.1))
+                .collect(),
+            primary,
+            TimeStamp::from(start_ts),
+            0,
+            false,
+            TimeStamp::from(for_update_ts),
+            None,
+            return_values,
+            TimeStamp::zero(),
+            false,
+            false,
+            false,
+            ctx,
+        );
+        let context = WriteContext {
+            lock_mgr: &MockLockManager::new(),
+            concurrency_manager,
+            extra_op: ExtraOp::Noop,
+            statistics,
+            async_apply_prewrite: false,
+            raw_ext: None,
+            txn_status_cache: Arc::new(TxnStatusCache::new_for_test()),
+        };
+
+        let ret = cmd.cmd.process_write(snap, context).unwrap();
+        let ctx = Context::default();
+        engine.write(&ctx, ret.to_be_write).unwrap();
+        match ret.pr {
+            ProcessResult::PessimisticLockRes { res } => res.unwrap(),
+            _ => unreachable!(),
         }
     }
 }

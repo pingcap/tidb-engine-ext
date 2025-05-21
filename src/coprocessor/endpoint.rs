@@ -6,7 +6,7 @@ use std::{
 };
 
 use ::tracker::{
-    set_tls_tracker_token, with_tls_tracker, RequestInfo, RequestType, GLOBAL_TRACKERS,
+    set_tls_tracker_token, track, with_tls_tracker, RequestInfo, RequestType, GLOBAL_TRACKERS,
 };
 use api_version::{dispatch_api_version, KvFormat};
 use async_stream::try_stream;
@@ -49,6 +49,7 @@ use crate::{
         mvcc::Error as MvccError,
         need_check_locks, need_check_locks_in_replica_read, Engine, Snapshot, SnapshotStore,
     },
+    tikv_util::time::InstantExt,
 };
 
 /// Requests that need time of less than `LIGHT_TASK_THRESHOLD` is considered as
@@ -478,7 +479,7 @@ impl<E: Engine> Endpoint<E> {
 
         let deadline = tracker.req_ctx.deadline;
         let handle_request_future = check_deadline(handler.handle_request(), deadline);
-        let handle_request_future = track(handle_request_future, &mut tracker);
+        let handle_request_future = track(handle_request_future, tracker.as_mut());
 
         let deadline_res = if let Some(semaphore) = &semaphore {
             limit_concurrency(handle_request_future, semaphore, LIGHT_TASK_THRESHOLD).await
@@ -588,7 +589,11 @@ impl<E: Engine> Endpoint<E> {
         mut req: coppb::Request,
         peer: Option<String>,
     ) -> impl Future<Output = MemoryTraceGuard<coppb::Response>> {
-        let now = Instant::now();
+        let tracker = GLOBAL_TRACKERS.insert(::tracker::Tracker::new(RequestInfo::new(
+            req.get_context(),
+            RequestType::Unknown,
+            req.start_ts,
+        )));
         // Check the load of the read pool. If it's too busy, generate and return
         // error in the gRPC thread to avoid waiting in the queue of the read pool.
         if let Err(busy_err) = self.read_pool.check_busy_threshold(Duration::from_millis(
@@ -600,18 +605,14 @@ impl<E: Engine> Endpoint<E> {
             return Either::Left(async move { resp.into() });
         }
 
-        let tracker = GLOBAL_TRACKERS.insert(::tracker::Tracker::new(RequestInfo::new(
-            req.get_context(),
-            RequestType::Unknown,
-            req.start_ts,
-        )));
         let result_of_batch = self.process_batch_tasks(&mut req, &peer);
         set_tls_tracker_token(tracker);
         let result_of_future = self
             .parse_request_and_check_memory_locks(req, peer, false)
             .map(|(handler_builder, req_ctx)| self.handle_unary_request(req_ctx, handler_builder));
         with_tls_tracker(|tracker| {
-            tracker.metrics.grpc_process_nanos = now.saturating_elapsed().as_nanos() as u64;
+            tracker.metrics.grpc_process_nanos =
+                tracker.req_info.begin.saturating_elapsed().as_nanos() as u64;
         });
         let fut = async move {
             let res = match result_of_future {
@@ -628,7 +629,7 @@ impl<E: Engine> Endpoint<E> {
                     GLOBAL_TRACKERS.with_tracker(tracker, |tracker| {
                         let exec_detail_v2 = res.mut_exec_details_v2();
                         tracker.write_scan_detail(exec_detail_v2.mut_scan_detail_v2());
-                        tracker.write_time_detail(exec_detail_v2.mut_time_detail_v2());
+                        tracker.merge_time_detail(exec_detail_v2.mut_time_detail_v2());
                     });
                     res
                 }
@@ -1152,7 +1153,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -1194,7 +1195,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let mut copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -1233,7 +1234,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -1257,7 +1258,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -1306,7 +1307,7 @@ mod tests {
             .collect::<Vec<_>>(),
         );
 
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -1358,7 +1359,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -1384,7 +1385,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -1438,7 +1439,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -1467,7 +1468,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -1564,7 +1565,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config {
                 end_point_stream_channel_size: 3,
@@ -1637,7 +1638,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &config,
             read_pool.handle(),
@@ -2017,7 +2018,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),
@@ -2074,7 +2075,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let key = Key::from_raw(b"key");
         let guard = block_on(cm.lock_key(&key));
         guard.with_lock(|lock| {
@@ -2137,7 +2138,7 @@ mod tests {
             &CoprReadPoolConfig::default_for_test(),
             engine,
         ));
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let copr = Endpoint::<RocksEngine>::new(
             &Config::default(),
             read_pool.handle(),

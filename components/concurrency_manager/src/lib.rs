@@ -95,7 +95,7 @@ pub struct ConcurrencyManager {
     // approximate limit.
     max_ts_limit: Arc<AtomicCell<MaxTsLimit>>,
     limit_valid_duration: Duration,
-    action_on_invalid_max_ts: Arc<AtomicActionOnInvalidMaxTs>,
+    action_on_invalid_max_ts_update: Arc<AtomicActionOnInvalidMaxTs>,
 
     max_ts_drift_allowance_ms: Arc<AtomicU64>,
 
@@ -105,20 +105,35 @@ pub struct ConcurrencyManager {
 }
 
 impl ConcurrencyManager {
-    pub fn new(latest_ts: TimeStamp) -> Self {
+    /// This is ONLY used in tests, please do not use it elsewhere.
+    /// To create a new concurrency manager, please use `new_with_config`
+    /// instead.
+    pub fn new_for_test(latest_ts: TimeStamp) -> Self {
         Self::new_with_config(
             latest_ts,
             DEFAULT_LIMIT_VALID_DURATION,
             ActionOnInvalidMaxTs::Panic,
             None,
-            Duration::ZERO,
+            DEFAULT_LIMIT_VALID_DURATION + Duration::from_secs(1),
+        )
+    }
+
+    /// This is ONLY used by `GcRunnerCore` as a temporary solution, please do
+    /// not use it elsewhere.
+    pub fn new_dummy() -> Self {
+        Self::new_with_config(
+            1.into(),
+            DEFAULT_LIMIT_VALID_DURATION,
+            ActionOnInvalidMaxTs::Log,
+            None,
+            DEFAULT_LIMIT_VALID_DURATION + Duration::from_secs(1),
         )
     }
 
     pub fn new_with_config(
         latest_ts: TimeStamp,
         limit_valid_duration: Duration,
-        action_on_invalid_max_ts: ActionOnInvalidMaxTs,
+        action_on_invalid_max_ts_update: ActionOnInvalidMaxTs,
         tso: Option<Arc<dyn TSOProvider>>,
         max_ts_drift_allowance: Duration,
     ) -> Self {
@@ -129,7 +144,7 @@ impl ConcurrencyManager {
 
         if limit_valid_duration >= max_ts_drift_allowance {
             error!("improper setting: limit_valid_duration >= max_ts_drift_allowance; \
-                consider increasing max-ts-drift-allowance or decreasing max-ts-sync-interval";
+                consider increasing storage.max-ts.max-drift or decreasing storage.max-ts.cache-sync-interval";
                 "limit_valid_duration" => ?limit_valid_duration,
                 "max_ts_drift_allowance" => ?max_ts_drift_allowance,
             );
@@ -139,8 +154,8 @@ impl ConcurrencyManager {
             max_ts: Arc::new(AtomicU64::new(latest_ts.into_inner())),
             max_ts_limit: Arc::new(AtomicCell::new(initial_limit)),
             lock_table: LockTable::default(),
-            action_on_invalid_max_ts: Arc::new(AtomicActionOnInvalidMaxTs::new(
-                action_on_invalid_max_ts,
+            action_on_invalid_max_ts_update: Arc::new(AtomicActionOnInvalidMaxTs::new(
+                action_on_invalid_max_ts_update,
             )),
             limit_valid_duration,
             time_provider: Arc::new(CoarseInstantTimeProvider),
@@ -155,7 +170,7 @@ impl ConcurrencyManager {
     fn new_with_time_provider(
         latest_ts: TimeStamp,
         limit_valid_duration: Duration,
-        action_on_invalid_max_ts: ActionOnInvalidMaxTs,
+        action_on_invalid_max_ts_update: ActionOnInvalidMaxTs,
         time_provider: Arc<dyn TimeProvider>,
         tso: Option<Arc<dyn TSOProvider>>,
         max_ts_drift_allowance: Duration,
@@ -168,8 +183,8 @@ impl ConcurrencyManager {
             max_ts: Arc::new(AtomicU64::new(latest_ts.into_inner())),
             max_ts_limit: Arc::new(AtomicCell::new(initial_limit)),
             lock_table: LockTable::default(),
-            action_on_invalid_max_ts: Arc::new(AtomicActionOnInvalidMaxTs::new(
-                action_on_invalid_max_ts,
+            action_on_invalid_max_ts_update: Arc::new(AtomicActionOnInvalidMaxTs::new(
+                action_on_invalid_max_ts_update,
             )),
             limit_valid_duration,
             time_provider,
@@ -209,8 +224,10 @@ impl ConcurrencyManager {
         if !limit.limit.is_zero() && new_ts > limit.limit {
             let last_update = limit.update_time;
             let now = self.time_provider.now();
-            assert!(now >= last_update);
-            let duration_to_last_limit_update = now - last_update;
+            if now < last_update {
+                warn!("clock went backwards"; "now" => ?now, "last_update" => ?last_update);
+            }
+            let duration_to_last_limit_update = now.saturating_duration_since(last_update);
 
             if duration_to_last_limit_update < self.limit_valid_duration {
                 // limit is valid
@@ -250,7 +267,7 @@ impl ConcurrencyManager {
         source: impl slog::Value + Display,
         using_approximate: bool,
     ) -> Result<(), crate::InvalidMaxTsUpdate> {
-        warn!("possible invalid max-ts update; double checking";
+        warn!("possible invalid max_ts update; double checking";
             "attempted_ts" => new_ts,
             "limit" => limit.into_inner(),
             "source" => &source,
@@ -305,7 +322,7 @@ impl ConcurrencyManager {
             );
         }
 
-        match self.action_on_invalid_max_ts.load() {
+        match self.action_on_invalid_max_ts_update.load() {
             ActionOnInvalidMaxTs::Panic if tso_confirmed => {
                 panic!(
                     "invalid max_ts update: {} exceeds the limit {}, source={}",
@@ -322,11 +339,13 @@ impl ConcurrencyManager {
         }
     }
 
-    /// Set the maximum allowed value for max_ts updates, except for the updates
-    /// from PD TSO. The limit must be updated regularly to prevent the
-    /// blocking of max_ts. It prevents max_ts from being updated to an
-    /// unreasonable value, which is usually caused by bugs or unsafe
-    /// usages.
+    /// Set the maximum allowed value for max_ts updates.
+    /// The actual limit is calculated by adding a drift allowance to the
+    /// provided timestamp to accommodate lag in TSO syncing.
+    /// The limit must be updated regularly to prevent failure of updating
+    /// max_ts.
+    /// It prevents max_ts from being updated to an unreasonable
+    /// value, which is usually caused by bugs or unsafe usages.
     ///
     /// # Note
     /// If the new limit is smaller than the current limit, this operation will
@@ -450,8 +469,8 @@ impl ConcurrencyManager {
         min_lock
     }
 
-    pub fn set_action_on_invalid_max_ts(&self, action: ActionOnInvalidMaxTs) {
-        self.action_on_invalid_max_ts.store(action);
+    pub fn set_action_on_invalid_max_ts_update(&self, action: ActionOnInvalidMaxTs) {
+        self.action_on_invalid_max_ts_update.store(action);
     }
 
     pub fn set_max_ts_drift_allowance(&self, allowance: Duration) {
@@ -645,7 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lock_keys_order() {
-        let concurrency_manager = ConcurrencyManager::new(1.into());
+        let concurrency_manager = ConcurrencyManager::new_for_test(1.into());
         let keys: Vec<_> = [b"c", b"a", b"b"]
             .iter()
             .copied()
@@ -659,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_max_ts() {
-        let concurrency_manager = ConcurrencyManager::new(10.into());
+        let concurrency_manager = ConcurrencyManager::new_for_test(10.into());
         let _ = concurrency_manager.update_max_ts(20.into(), "");
         assert_eq!(concurrency_manager.max_ts(), 20.into());
 
@@ -687,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_global_min_lock_ts() {
-        let concurrency_manager = ConcurrencyManager::new(1.into());
+        let concurrency_manager = ConcurrencyManager::new_for_test(1.into());
 
         assert_eq!(concurrency_manager.global_min_lock_ts(), None);
         let guard = concurrency_manager.lock_key(&Key::from_raw(b"a")).await;
@@ -752,20 +771,20 @@ mod tests {
 
     #[test]
     fn test_max_ts_limit_edge_cases() {
-        let cm = ConcurrencyManager::new(TimeStamp::new(100));
+        let cm = ConcurrencyManager::new_for_test(TimeStamp::new(100));
 
         // Test transition from zero limit
         assert_eq!(cm.max_ts_limit.load().limit, 0.into());
         cm.set_max_ts_limit(TimeStamp::new(1000));
-        assert_eq!(cm.max_ts_limit.load().limit, 1000.into());
+        assert_eq!(cm.max_ts_limit.load().limit, 12058625000.into());
 
         // Try to lower from 1000 to 500 - should be ignored
         cm.set_max_ts_limit(TimeStamp::new(500));
-        assert_eq!(cm.max_ts_limit.load().limit, 1000.into());
+        assert_eq!(cm.max_ts_limit.load().limit, 12058625000.into());
 
         // Test setting limit to max, should have no effect
         cm.set_max_ts_limit(TimeStamp::max());
-        assert_eq!(cm.max_ts_limit.load().limit, 1000.into());
+        assert_eq!(cm.max_ts_limit.load().limit, 12058625000.into());
     }
 
     #[test]
@@ -883,7 +902,7 @@ mod tests {
 
     #[test]
     fn test_update_max_ts_without_limit() {
-        let cm = ConcurrencyManager::new(TimeStamp::new(100));
+        let cm = ConcurrencyManager::new_for_test(TimeStamp::new(100));
 
         cm.update_max_ts(TimeStamp::new(500), "test_source".to_string())
             .unwrap();

@@ -285,6 +285,7 @@ impl RaftStoreProxy {
         })();
 
         #[cfg(not(any(test, feature = "testexport")))]
+        #[allow(non_upper_case_globals)]
         const status_server_retry_limit: u64 = 5;
         loop {
             match self.request_for_raftstore_version(&to_try_addrs, timeout_ms) {

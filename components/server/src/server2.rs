@@ -70,7 +70,7 @@ use raftstore_v2::{
 };
 use resolved_ts::Task;
 use resource_control::{config::ResourceContrlCfgMgr, ResourceGroupManager};
-use security::SecurityManager;
+use security::{SecurityConfigManager, SecurityManager};
 use service::{service_event::ServiceEvent, service_manager::GrpcServiceManager};
 use tikv::{
     config::{
@@ -331,15 +331,16 @@ where
         let latest_ts = block_on(pd_client.get_tso()).expect("failed to get timestamp from PD");
         let concurrency_manager = ConcurrencyManager::new_with_config(
             latest_ts,
-            (config.storage.max_ts_sync_interval * LIMIT_VALID_TIME_MULTIPLIER).into(),
+            (config.storage.max_ts.cache_sync_interval * LIMIT_VALID_TIME_MULTIPLIER).into(),
             config
                 .storage
-                .action_on_invalid_max_ts
+                .max_ts
+                .action_on_invalid_update
                 .as_str()
                 .try_into()
                 .unwrap(),
             Some(pd_client.clone()),
-            config.storage.max_ts_drift_allowance.0,
+            config.storage.max_ts.max_drift.0,
         );
 
         // use different quota for front-end and back-end requests
@@ -465,7 +466,10 @@ where
 
         cfg_controller.register(tikv::config::Module::Log, Box::new(LogConfigManager));
         cfg_controller.register(tikv::config::Module::Memory, Box::new(MemoryConfigManager));
-
+        cfg_controller.register(
+            tikv::config::Module::Security,
+            Box::new(SecurityConfigManager),
+        );
         let lock_mgr = LockManager::new(&self.core.config.pessimistic_txn);
         cfg_controller.register(
             tikv::config::Module::PessimisticTxn,
@@ -970,7 +974,7 @@ where
         let cm = self.concurrency_manager.clone();
         let pd_client = self.pd_client.clone();
 
-        let max_ts_sync_interval = self.core.config.storage.max_ts_sync_interval.into();
+        let max_ts_sync_interval = self.core.config.storage.max_ts.cache_sync_interval.into();
         self.core
             .background_worker
             .spawn_interval_async_task(max_ts_sync_interval, move || {

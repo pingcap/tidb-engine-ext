@@ -22,7 +22,7 @@ use std::{
 
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{CfName, KvEngine, MvccProperties, Snapshot, CF_LOCK};
+use engine_traits::{CfName, KvEngine, MvccProperties, Snapshot};
 use futures::{future::BoxFuture, task::AtomicWaker, Future, Stream, StreamExt, TryFutureExt};
 use hybrid_engine::HybridEngineSnapshot;
 use in_memory_engine::RegionCacheMemoryEngine;
@@ -506,21 +506,6 @@ where
         }
 
         let reqs: Vec<Request> = batch.modifies.into_iter().map(Into::into).collect();
-        // Ref: https://github.com/tikv/tikv/issues/16818.
-        // Check for duplicate key entries before proposing commands.
-        // TODO: remove this check when the cause of issue 16818 is located.
-        let mut keys_set = std::collections::HashSet::new();
-        for req in &reqs {
-            if req.has_put() && req.get_put().get_cf() == CF_LOCK {
-                let key = req.get_put().get_key();
-                if !keys_set.insert(key.to_vec()) {
-                    panic!(
-                        "found duplicate key in Lock CF PUT request, key: {:?}, extra: {:?}, ctx: {:?}, reqs: {:?}, avoid_batch:{:?}",
-                        key, batch.extra, ctx, reqs, batch.avoid_batch
-                    );
-                }
-            }
-        }
         let txn_extra = batch.extra;
         let mut header = new_request_header(ctx);
         if batch.avoid_batch {
@@ -823,7 +808,13 @@ impl ReplicaReadLockChecker {
 impl Coprocessor for ReplicaReadLockChecker {}
 
 impl ReadIndexObserver for ReplicaReadLockChecker {
-    fn on_step(&self, msg: &mut eraftpb::Message, role: StateRole) {
+    fn on_step(
+        &self,
+        msg: &mut eraftpb::Message,
+        role: StateRole,
+        region_start_key: Option<&[u8]>,
+        region_end_key: Option<&[u8]>,
+    ) {
         // Only check and return result if the current peer is a leader.
         // If it's not a leader, the read index request will be redirected to the leader
         // later.
@@ -840,16 +831,16 @@ impl ReadIndexObserver for ReplicaReadLockChecker {
                 .concurrency_manager
                 .update_max_ts(start_ts, || format!("read_index-{}", start_ts))
             {
-                error!("failed to update max ts in concurrency manager"; "err" => ?e);
+                error!("failed to update max_ts in concurrency manager"; "err" => ?e);
             }
+            let key_bound = |key: Vec<u8>| {
+                if key.is_empty() {
+                    None
+                } else {
+                    Some(txn_types::Key::from_encoded(key))
+                }
+            };
             for range in request.mut_key_ranges().iter_mut() {
-                let key_bound = |key: Vec<u8>| {
-                    if key.is_empty() {
-                        None
-                    } else {
-                        Some(txn_types::Key::from_encoded(key))
-                    }
-                };
                 let start_key = key_bound(range.take_start_key());
                 let end_key = key_bound(range.take_end_key());
                 // The replica read is not compatible with `RcCheckTs` isolation level yet.
@@ -879,6 +870,34 @@ impl ReadIndexObserver for ReplicaReadLockChecker {
                         .observe(begin_instant.saturating_elapsed().as_secs_f64());
                 }
             }
+            if rctx.locked.is_none() && !start_ts.is_max() {
+                if let (Some(region_start_key), Some(region_end_key)) =
+                    (region_start_key, region_end_key)
+                {
+                    // check if there is a memory lock on a region
+                    let start_key = key_bound(region_start_key.to_vec());
+                    let end_key = key_bound(region_end_key.to_vec());
+
+                    let res = self.concurrency_manager.read_range_check(
+                        start_key.as_ref(),
+                        end_key.as_ref(),
+                        |key, lock| {
+                            // It returns immediately upon encountering a lock in a region,
+                            // regardless of the timestamp.This optimization is for the read index
+                            // cache on the follower side. Considering
+                            // timestamps might require scanning the
+                            // entire region.
+                            let raw_key = key.to_raw()?;
+                            Err(txn_types::Error::from(txn_types::ErrorInner::KeyIsLocked(
+                                lock.clone().into_lock_info(raw_key),
+                            )))
+                        },
+                    );
+                    if res.is_ok() {
+                        rctx.read_index_safe_ts = Some(start_ts.into_inner());
+                    }
+                }
+            }
             msg.mut_entries()[0].set_data(rctx.to_bytes().into());
         }
     }
@@ -895,7 +914,7 @@ mod tests {
     // index.
     #[test]
     fn test_replica_read_lock_checker_for_single_uuid() {
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let checker = ReplicaReadLockChecker::new(cm);
         let mut m = eraftpb::Message::default();
         m.set_msg_type(MessageType::MsgReadIndex);
@@ -904,13 +923,13 @@ mod tests {
         e.set_data(uuid.as_bytes().to_vec().into());
         m.mut_entries().push(e);
 
-        checker.on_step(&mut m, StateRole::Leader);
+        checker.on_step(&mut m, StateRole::Leader, None, None);
         assert_eq!(m.get_entries()[0].get_data(), uuid.as_bytes());
     }
 
     #[test]
     fn test_replica_read_lock_check_when_not_leader() {
-        let cm = ConcurrencyManager::new(1.into());
+        let cm = ConcurrencyManager::new_for_test(1.into());
         let checker = ReplicaReadLockChecker::new(cm);
         let mut m = eraftpb::Message::default();
         m.set_msg_type(MessageType::MsgReadIndex);
@@ -920,12 +939,13 @@ mod tests {
             id: Uuid::new_v4(),
             request: Some(request),
             locked: None,
+            read_index_safe_ts: None,
         };
         let mut e = eraftpb::Entry::default();
         e.set_data(rctx.to_bytes().into());
         m.mut_entries().push(e);
 
-        checker.on_step(&mut m, StateRole::Follower);
+        checker.on_step(&mut m, StateRole::Follower, None, None);
         assert_eq!(m.get_entries()[0].get_data(), rctx.to_bytes());
     }
 }

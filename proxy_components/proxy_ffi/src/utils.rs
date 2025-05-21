@@ -1,11 +1,35 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::time;
+use std::{
+    sync::mpsc,
+    thread::Builder,
+    time::{self},
+};
 
 use futures_util::{compat::Future01CompatExt, future::BoxFuture, FutureExt};
 use lazy_static::lazy_static;
-use tikv_util::timer::start_global_timer;
+use tikv_util::{sys::thread::StdThreadBuildWrapper, thd_name, thread_group};
 use tokio_timer::timer::Handle;
+
+/// The function has been replaced by `start_timer_thread` which is a private
+/// fn. So we re-implement it here.
+pub fn start_global_timer(name: &str) -> Handle {
+    let (tx, rx) = mpsc::channel();
+    let props = thread_group::current_properties();
+    Builder::new()
+        .name(thd_name!(name))
+        .spawn_wrapper(move || {
+            thread_group::set_properties(props);
+
+            let mut timer = tokio_timer::Timer::default();
+            tx.send(timer.handle()).unwrap();
+            loop {
+                timer.turn(None).unwrap();
+            }
+        })
+        .unwrap();
+    rx.recv().unwrap()
+}
 
 lazy_static! {
     pub static ref PROXY_TIMER_HANDLE: Handle = start_global_timer("proxy-timer");

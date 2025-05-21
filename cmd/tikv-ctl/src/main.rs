@@ -20,7 +20,10 @@ use std::{
 };
 
 use collections::HashMap;
-use compact_log_backup::{exec_hooks as compact_log_hooks, execute as compact_log, TraceResultExt};
+use compact_log_backup::{
+    exec_hooks::{self as compact_log_hooks, skip_small_compaction::SkipSmallCompaction},
+    execute as compact_log, TraceResultExt,
+};
 use crypto::fips;
 use encryption_export::{
     create_backend, data_key_manager_from_config, DataKeyManager, DecrypterReader, Iv,
@@ -53,7 +56,13 @@ use tikv::{
     server::{debug::BottommostLevelCompaction, KvEngineFactoryBuilder},
     storage::config::EngineType,
 };
-use tikv_util::{escape, run_and_wait_child_process, sys::thread::StdThreadBuildWrapper, unescape};
+use tikv_util::{
+    escape,
+    logger::{get_log_level, Level},
+    run_and_wait_child_process,
+    sys::thread::StdThreadBuildWrapper,
+    unescape, warn,
+};
 use txn_types::Key;
 
 use crate::{cmd::*, executor::*, util::*};
@@ -397,6 +406,7 @@ fn main() {
             compression_level,
             name,
             force_regenerate,
+            minimal_compaction_size,
         } => {
             let tmp_engine =
                 TemporaryRocks::new(&cfg).expect("failed to create temp engine for writing SSTs.");
@@ -447,6 +457,11 @@ fn main() {
                     tikv_util::info!("Welcome to TiKV control: compact log backup.");
                     tikv_util::info!("TiKV version info."; "info_string" => tikv::tikv_version_info(None));
 
+                    let level = get_log_level();
+                    if level < Some(Level::Info) {
+                        warn!("Most of compact-log progress logs are only enabled in the `info` level."; "current_level" => ?level);
+                    }
+
                     let srv = StatusServerLite::new(Arc::new(self.cfg.security.clone()));
                     let _enter = cx.async_rt.enter();
                     let hnd = srv
@@ -467,8 +482,12 @@ fn main() {
             } else {
                 Some(compact_log_hooks::checkpoint::Checkpoint::default())
             };
+            let skip_small_compaction = SkipSmallCompaction::new(minimal_compaction_size.0);
             let hooks = (
-                ((log_to_term, checkpoint), with_status_server),
+                (
+                    (log_to_term, checkpoint),
+                    (with_status_server, skip_small_compaction),
+                ),
                 (save_meta, with_lock),
             );
             match exec.run(hooks) {

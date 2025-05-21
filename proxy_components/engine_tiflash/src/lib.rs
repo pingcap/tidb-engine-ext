@@ -18,6 +18,7 @@
 #![cfg_attr(test, feature(test))]
 #![feature(let_chains)]
 #![feature(option_get_or_insert_default)]
+#![allow(clippy::redundant_closure_call)]
 
 #[allow(unused_extern_crates)]
 extern crate tikv_alloc;

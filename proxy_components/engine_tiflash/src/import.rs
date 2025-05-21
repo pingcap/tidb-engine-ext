@@ -1,9 +1,10 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 #![allow(unreachable_code)]
 #![allow(unused_variables)]
-use engine_traits::{ImportExt, IngestExternalFileOptions, Result};
+
+use engine_traits::{ImportExt, IngestExternalFileOptions, Range, Result};
 use rocksdb::IngestExternalFileOptions as RawIngestExternalFileOptions;
-use tikv_util::time::Instant;
+use tikv_util::{range_latch::RangeLatchGuard, time::Instant};
 
 use crate::{
     engine::RocksEngine, perf_context_metrics::INGEST_EXTERNAL_FILE_TIME_HISTOGRAM, r2e, util,
@@ -12,7 +13,12 @@ use crate::{
 impl ImportExt for RocksEngine {
     type IngestExternalFileOptions = RocksIngestExternalFileOptions;
 
-    fn ingest_external_file_cf(&self, cf_name: &str, files: &[&str]) -> Result<()> {
+    fn ingest_external_file_cf(
+        &self,
+        cf_name: &str,
+        files: &[&str],
+        range: Option<Range<'_>>,
+    ) -> Result<()> {
         // do nothing
         return Ok(());
 
@@ -45,6 +51,12 @@ impl ImportExt for RocksEngine {
         }
         Ok(())
     }
+
+    fn acquire_ingest_latch(&self, range: Range<'_>) -> RangeLatchGuard<'_> {
+        self.rocks
+            .ingest_latch
+            .acquire(range.start_key.to_vec(), range.end_key.to_vec())
+    }
 }
 
 pub struct RocksIngestExternalFileOptions(RawIngestExternalFileOptions);
@@ -56,6 +68,10 @@ impl IngestExternalFileOptions for RocksIngestExternalFileOptions {
 
     fn move_files(&mut self, f: bool) {
         self.0.move_files(f);
+    }
+
+    fn allow_write(&mut self, f: bool) {
+        self.0.set_allow_write(f);
     }
 }
 
@@ -130,7 +146,11 @@ mod tests {
             sst2.put(v.as_bytes(), v.as_bytes()).unwrap();
         }
         sst2.finish().unwrap();
-        db.ingest_external_file_cf(CF_DEFAULT, &[p1.to_str().unwrap(), p2.to_str().unwrap()])
-            .unwrap();
+        db.ingest_external_file_cf(
+            CF_DEFAULT,
+            &[p1.to_str().unwrap(), p2.to_str().unwrap()],
+            None,
+        )
+        .unwrap();
     }
 }

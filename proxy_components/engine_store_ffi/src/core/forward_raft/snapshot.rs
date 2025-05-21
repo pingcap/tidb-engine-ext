@@ -382,6 +382,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
                 should_check_fap_snapshot = true;
             });
         })();
+        #[allow(clippy::collapsible_if)]
         if should_check_fap_snapshot {
             if self.engine_store_server_helper.query_fap_snapshot_state(
                 region.get_id(),

@@ -293,8 +293,9 @@ impl<T: Transport + 'static, ER: RaftEngine> ApplySnapshotObserver for TiFlashOb
         k: &raftstore::store::SnapKey,
         s: Option<&raftstore::store::Snapshot>,
     ) {
-        self.forwarder
-            .on_apply_snapshot_committed(ob_ctx.region(), id, k, s)
+        if let Some(ref forwarder) = *self.forwarder.read().expect("poisoned") {
+            forwarder.on_apply_snapshot_committed(ob_ctx.region(), id, k, s)
+        }
     }
 }
 

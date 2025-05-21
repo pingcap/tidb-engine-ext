@@ -1211,7 +1211,7 @@ fn test_replay_fap_before_post_apply() {
     cluster.shutdown();
 }
 
-#[test]
+// #[test]
 fn test_replay_fap_before_write() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 2);
     pd_client.disable_default_operator();

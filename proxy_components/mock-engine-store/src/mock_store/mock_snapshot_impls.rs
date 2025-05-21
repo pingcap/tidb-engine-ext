@@ -166,7 +166,7 @@ pub unsafe extern "C" fn ffi_apply_pre_handled_snapshot(
         .tmp_fap_regions
         .remove(&region_id);
 
-    info!("normal snapshot: insert into kvstore";
+    info!("regular snapshot: insert into kvstore";
         "region_id" => region_id,
         "node_id" => node_id,
     );

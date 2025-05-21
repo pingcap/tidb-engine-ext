@@ -481,6 +481,9 @@ impl ServerCluster {
             raft_kv_v2,
             LocalTablets::Registry(tablet_registry.clone()),
             Arc::clone(&importer),
+            None,
+            None,
+            Arc::new(self.region_info_accessor.clone()),
         );
 
         // Create deadlock service.

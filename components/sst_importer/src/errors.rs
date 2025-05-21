@@ -2,6 +2,7 @@
 
 use std::{
     error::Error as StdError, io::Error as IoError, num::ParseIntError, path::PathBuf, result,
+    time::Duration,
 };
 
 use encryption::Error as EncryptionError;
@@ -115,6 +116,12 @@ pub enum Error {
 
     #[error("Importing a SST file with imcompatible api version")]
     IncompatibleApiVersion,
+
+    #[error("{0}, please retry write later")]
+    RequestTooNew(String),
+
+    #[error("{0}, please rescan region later")]
+    RequestTooOld(String),
 
     #[error("Key mode mismatched with the request mode, writer: {:?}, storage: {:?}, key: {}", .writer, .storage_api_version, .key)]
     InvalidKeyMode {

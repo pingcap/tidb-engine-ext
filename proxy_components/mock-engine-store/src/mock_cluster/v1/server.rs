@@ -396,6 +396,7 @@ impl ServerCluster {
             Arc::clone(&importer),
             None,
             None, // TODO resource_ctl
+            Arc::new(region_info_accessor.clone()),
         );
 
         let check_leader_runner =

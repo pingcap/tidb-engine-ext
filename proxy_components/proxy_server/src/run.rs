@@ -1369,6 +1369,7 @@ impl<ER: RaftEngine, F: KvFormat> TiKvServer<ER, F> {
             servers.importer.clone(),
             None,
             self.resource_manager.clone(),
+            Arc::new(self.region_info_accessor.clone()),
         );
         if servers
             .server

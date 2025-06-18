@@ -20,6 +20,7 @@ pub mod engine_store_helper_impls;
 pub mod raftstore_proxy;
 pub mod raftstore_proxy_helper_impls;
 pub mod read_index_helper;
+pub mod jemalloc_utils;
 // FFI releated with reading from SST/RocksDB files.
 pub mod snapshot_reader_impls;
 pub mod utils;

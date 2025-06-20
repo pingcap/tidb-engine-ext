@@ -35,9 +35,12 @@ backup-stream-debug = ["backup-stream/backup-stream-debug"]
 testexport = ["engine_tiflash/testexport", "engine_store_ffi/testexport", "tikv/testexport"]
 pprof-fp = ["tikv/pprof-fp"]
 
+external-jemalloc = ["engine_store_ffi/external-jemalloc"]
+
 [dependencies]
 api_version = { workspace = true }
 async-stream = "0.2"
+backtrace = "0.3"
 backup = { workspace = true, default-features = false }
 backup-stream = { workspace = true, default-features = false }
 causal_ts = { workspace = true }
@@ -80,6 +83,7 @@ pin-project = "1.0"
 pprof = { version = "0.11", default-features = false, features = ["flamegraph", "protobuf-codec", "cpp"] }
 prometheus = { version = "0.13", features = ["nightly"] }
 protobuf = { version = "2.8", features = ["bytes"] }
+proxy_ffi = { workspace = true, default-features = false }
 raft = { version = "0.7.0", default-features = false, features = ["protobuf-codec"] }
 raft_log_engine = { workspace = true, default-features = false }
 raftstore = { workspace = true, default-features = false }

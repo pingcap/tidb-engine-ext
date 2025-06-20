@@ -4708,6 +4708,7 @@ version = "0.0.1"
 dependencies = [
  "api_version",
  "async-stream 0.2.0",
+ "backtrace",
  "backup",
  "backup-stream",
  "causal_ts",
@@ -4748,6 +4749,7 @@ dependencies = [
  "pprof",
  "prometheus",
  "protobuf",
+ "proxy_ffi",
  "raft",
  "raft_log_engine",
  "raftstore",

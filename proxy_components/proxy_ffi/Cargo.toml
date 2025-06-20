@@ -23,6 +23,8 @@ test-engines-panic = [
   "engine_test/test-engines-panic",
 ]
 
+external-jemalloc = []
+
 [dependencies]
 encryption = { workspace = true, default-features = false }
 engine_rocks = { workspace = true, default-features = false }

@@ -1,6 +1,10 @@
 // Copyright 2018 TiKV Project Authors. Licensed under Apache-2.0.
 
+pub mod profile;
+pub mod vendored_utils;
+
 use std::{
+    env::args,
     error::Error as StdError,
     marker::PhantomData,
     net::SocketAddr,
@@ -37,19 +41,17 @@ use openssl::{
     x509::X509,
 };
 use pin_project::pin_project;
+use profile::{
+    activate_heap_profile, deactivate_heap_profile, dump_one_heap_profile, list_heap_profiles,
+    start_one_cpu_profile,
+};
 use raftstore::store::{transport::CasualRouter, CasualMessage};
 use regex::Regex;
 use security::{self, SecurityConfig};
 use serde_json::Value;
 use tikv::{
     config::{ConfigController, LogLevel},
-    server::{
-        status_server::{
-            activate_heap_profile, deactivate_heap_profile, jeprof_heap_profile,
-            list_heap_profiles, read_file, start_one_cpu_profile, start_one_heap_profile,
-        },
-        Result,
-    },
+    server::Result,
 };
 use tikv_util::{
     error, logger::set_log_level, metrics::dump, sys::thread::ThreadBuildWrapper,
@@ -61,6 +63,9 @@ use tokio::{
     sync::oneshot::{self, Receiver, Sender},
 };
 use tokio_openssl::SslStream;
+use vendored_utils::{jeprof_memory_status, jeprof_purge_arena};
+
+use crate::status_server::profile::set_prof_active;
 
 static TIMER_CANCELED: &str = "tokio timer canceled";
 
@@ -232,36 +237,40 @@ where
         Ok(make_response(StatusCode::OK, body))
     }
 
+    fn set_profile_active(_req: Request<Body>, val: bool) -> hyper::Result<Response<Body>> {
+        match set_prof_active(val) {
+            Ok(()) => Ok(make_response(StatusCode::OK, "set prof.active succeed")),
+            Err(err) => Ok(make_response(StatusCode::BAD_REQUEST, err)),
+        }
+    }
+
+    async fn arena_purge(_: Request<Body>) -> hyper::Result<Response<Body>> {
+        jeprof_purge_arena();
+        Ok(make_response(StatusCode::OK, "purge OK"))
+    }
+
+    async fn memory_status(_: Request<Body>) -> hyper::Result<Response<Body>> {
+        let s = jeprof_memory_status();
+        Ok(make_response(StatusCode::OK, s))
+    }
+
     #[allow(dead_code)]
     async fn dump_heap_prof_to_resp(req: Request<Body>) -> hyper::Result<Response<Body>> {
         let query = req.uri().query().unwrap_or("");
         let query_pairs: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
 
         let use_jeprof = query_pairs.get("jeprof").map(|x| x.as_ref()) == Some("true");
+        let output_format = match query_pairs.get("text").map(|x| x.as_ref()) {
+            None => "--svg",
+            Some("svg") => "--svg",
+            Some("text") => "--text",
+            Some("raw") => "--raw",
+            Some("collapsed") => "--collapsed",
+            _ => "--svg",
+        }
+        .to_string();
 
-        let result = if let Some(name) = query_pairs.get("name") {
-            if use_jeprof {
-                jeprof_heap_profile(name)
-            } else {
-                read_file(name)
-            }
-        } else {
-            let mut seconds = 10;
-            if let Some(s) = query_pairs.get("seconds") {
-                match s.parse() {
-                    Ok(val) => seconds = val,
-                    Err(_) => {
-                        let errmsg = "request should have seconds argument".to_owned();
-                        return Ok(make_response(StatusCode::BAD_REQUEST, errmsg));
-                    }
-                }
-            }
-            let timer = GLOBAL_TIMER_HANDLE.delay(Instant::now() + Duration::from_secs(seconds));
-            let end = Compat01As03::new(timer)
-                .map_err(|_| TIMER_CANCELED.to_owned())
-                .into_future();
-            start_one_heap_profile(end, use_jeprof).await
-        };
+        let result = dump_one_heap_profile(use_jeprof, output_format.clone());
 
         match result {
             Ok(body) => {
@@ -270,7 +279,7 @@ where
                     .header("X-Content-Type-Options", "nosniff")
                     .header("Content-Disposition", "attachment; filename=\"profile\"")
                     .header("Content-Length", body.len());
-                response = if use_jeprof {
+                response = if use_jeprof && output_format == "--svg" {
                     response.header("Content-Type", mime::IMAGE_SVG.to_string())
                 } else {
                     response.header("Content-Type", mime::APPLICATION_OCTET_STREAM.to_string())
@@ -336,6 +345,83 @@ where
                 "Internal Server Error",
             ),
         })
+    }
+
+    fn get_cmdline(_req: Request<Body>) -> hyper::Result<Response<Body>> {
+        let args = args().fold(String::new(), |mut a, b| {
+            a.push_str(&b);
+            a.push('\x00');
+            a
+        });
+        let response = Response::builder()
+            .header("Content-Type", mime::TEXT_PLAIN.to_string())
+            .header("X-Content-Type-Options", "nosniff")
+            .body(args.into())
+            .unwrap();
+        Ok(response)
+    }
+
+    fn get_symbol_count(req: Request<Body>) -> hyper::Result<Response<Body>> {
+        assert_eq!(req.method(), Method::GET);
+        // We don't know how many symbols we have, but we
+        // do have symbol information. pprof only cares whether
+        // this number is 0 (no symbols available) or > 0.
+        let text = "num_symbols: 1\n";
+        let response = Response::builder()
+            .header("Content-Type", mime::TEXT_PLAIN.to_string())
+            .header("X-Content-Type-Options", "nosniff")
+            .header("Content-Length", text.len())
+            .body(text.into())
+            .unwrap();
+        Ok(response)
+    }
+
+    // The request and response format follows pprof remote server
+    // https://gperftools.github.io/gperftools/pprof_remote_servers.html
+    // Here is the go pprof implementation:
+    // https://github.com/golang/go/blob/3857a89e7eb872fa22d569e70b7e076bec74ebbb/src/net/http/pprof/pprof.go#L191
+    async fn get_symbol(req: Request<Body>) -> hyper::Result<Response<Body>> {
+        assert_eq!(req.method(), Method::POST);
+        let mut text = String::new();
+        let body_bytes = hyper::body::to_bytes(req.into_body()).await?;
+        let body = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        // The request body is a list of addr to be resolved joined by '+'.
+        // Resolve addrs with addr2line and write the symbols each per line in
+        // response.
+        for pc in body.split('+') {
+            let addr = usize::from_str_radix(pc.trim_start_matches("0x"), 16).unwrap_or(0);
+            if addr == 0 {
+                info!("invalid addr: {}", addr);
+                continue;
+            }
+
+            // Would be multiple symbols if inlined.
+            let mut syms = vec![];
+            backtrace::resolve(addr as *mut std::ffi::c_void, |sym| {
+                let name = sym
+                    .name()
+                    .unwrap_or_else(|| backtrace::SymbolName::new(b"<unknown>"));
+                syms.push(name.to_string());
+            });
+
+            if !syms.is_empty() {
+                // join inline functions with '--'
+                let f = syms.join("--");
+                // should be <hex address> <function name>
+                text.push_str(format!("{:#x} {}\n", addr, f).as_str());
+            } else {
+                info!("can't resolve mapped addr: {:#x}", addr);
+                text.push_str(format!("{:#x} ??\n", addr).as_str());
+            }
+        }
+        let response = Response::builder()
+            .header("Content-Type", mime::TEXT_PLAIN.to_string())
+            .header("X-Content-Type-Options", "nosniff")
+            .header("Content-Length", text.len())
+            .body(text.into())
+            .unwrap();
+        Ok(response)
     }
 
     async fn update_config(
@@ -683,6 +769,12 @@ where
                                 dump(cfg_controller.get_current().server.simplify_metrics).into(),
                             )),
                             (Method::GET, "/status") => Ok(Response::default()),
+                            (Method::GET, "/debug/pprof/set_prof_active") => {
+                                Self::set_profile_active(req, true)
+                            }
+                            (Method::GET, "/debug/pprof/set_prof_inactive") => {
+                                Self::set_profile_active(req, false)
+                            }
                             (Method::GET, "/debug/pprof/heap_list") => Self::list_heap_prof(req),
                             (Method::GET, "/debug/pprof/heap_activate") => {
                                 Self::activate_heap_prof(req, store_path).await
@@ -690,9 +782,15 @@ where
                             (Method::GET, "/debug/pprof/heap_deactivate") => {
                                 Self::deactivate_heap_prof(req)
                             }
-                            // (Method::GET, "/debug/pprof/heap") => {
-                            //     Self::dump_heap_prof_to_resp(req).await
-                            // }
+                            (Method::GET, "/debug/pprof/heap") => {
+                                Self::dump_heap_prof_to_resp(req).await
+                            }
+                            (Method::GET, "/debug/pprof/arena_purge") => {
+                                Self::arena_purge(req).await
+                            }
+                            (Method::GET, "/debug/pprof/memory_status") => {
+                                Self::memory_status(req).await
+                            }
                             (Method::GET, "/config") => {
                                 Self::get_config(req, &cfg_controller, engine_store_server_helper)
                                     .await
@@ -711,6 +809,9 @@ where
                             (Method::GET, "/debug/pprof/profile") => {
                                 Self::dump_cpu_prof_to_resp(req).await
                             }
+                            (Method::GET, "/debug/pprof/cmdline") => Self::get_cmdline(req),
+                            (Method::GET, "/debug/pprof/symbol") => Self::get_symbol_count(req),
+                            (Method::POST, "/debug/pprof/symbol") => Self::get_symbol(req).await,
                             (Method::GET, "/debug/fail_point") => {
                                 info!("debug fail point API start");
                                 fail_point!("debug_fail_point");
@@ -730,7 +831,10 @@ where
                                 Self::handle_http_request(req, engine_store_server_helper).await
                             }
 
-                            _ => Ok(make_response(StatusCode::NOT_FOUND, "path not found")),
+                            _ => Ok(make_response(
+                                StatusCode::NOT_FOUND,
+                                format!("path not found, {:?}", req),
+                            )),
                         }
                     }
                 }))
@@ -1018,500 +1122,4 @@ where
         .status(status_code)
         .body(message.into())
         .unwrap()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{env, path::PathBuf, sync::Arc};
-
-    use collections::HashSet;
-    use engine_test::kv::KvTestEngine;
-    use futures::{executor::block_on, future::ok, prelude::*};
-    use hyper::{client::HttpConnector, Body, Client, Method, Request, StatusCode, Uri};
-    use hyper_openssl::HttpsConnector;
-    use online_config::OnlineConfig;
-    use openssl::ssl::{SslConnector, SslFiletype, SslMethod};
-    use raftstore::store::{transport::CasualRouter, CasualMessage};
-    use security::SecurityConfig;
-    use test_util::new_security_cfg;
-    use tikv_util::logger::get_log_level;
-
-    use crate::{
-        config::{ConfigController, TikvConfig},
-        server::status_server::{profile::TEST_PROFILE_MUTEX, LogLevelRequest, StatusServer},
-    };
-
-    #[derive(Clone)]
-    struct MockRouter;
-
-    impl CasualRouter<KvTestEngine> for MockRouter {
-        fn send(&self, region_id: u64, _: CasualMessage<KvTestEngine>) -> raftstore::Result<()> {
-            Err(raftstore::Error::RegionNotFound(region_id))
-        }
-    }
-
-    #[test]
-    fn test_status_service() {
-        let mut status_server = StatusServer::new(
-            1,
-            ConfigController::default(),
-            Arc::new(SecurityConfig::default()),
-            MockRouter,
-            std::env::temp_dir(),
-        )
-        .unwrap();
-        let addr = "127.0.0.1:0".to_owned();
-        let _ = status_server.start(addr);
-        let client = Client::new();
-        let uri = Uri::builder()
-            .scheme("http")
-            .authority(status_server.listening_addr().to_string().as_str())
-            .path_and_query("/metrics")
-            .build()
-            .unwrap();
-
-        let handle = status_server.thread_pool.spawn(async move {
-            let res = client.get(uri).await.unwrap();
-            assert_eq!(res.status(), StatusCode::OK);
-        });
-        block_on(handle).unwrap();
-        status_server.stop();
-    }
-
-    #[test]
-    fn test_security_status_service_without_cn() {
-        do_test_security_status_service(HashSet::default(), true);
-    }
-
-    #[test]
-    fn test_security_status_service_with_cn() {
-        let mut allowed_cn = HashSet::default();
-        allowed_cn.insert("tikv-server".to_owned());
-        do_test_security_status_service(allowed_cn, true);
-    }
-
-    #[test]
-    fn test_security_status_service_with_cn_fail() {
-        let mut allowed_cn = HashSet::default();
-        allowed_cn.insert("invaild-cn".to_owned());
-        do_test_security_status_service(allowed_cn, false);
-    }
-
-    #[test]
-    fn test_config_endpoint() {
-        let mut status_server = StatusServer::new(
-            1,
-            ConfigController::default(),
-            Arc::new(SecurityConfig::default()),
-            MockRouter,
-            std::env::temp_dir(),
-        )
-        .unwrap();
-        let addr = "127.0.0.1:0".to_owned();
-        let _ = status_server.start(addr);
-        let client = Client::new();
-        let uri = Uri::builder()
-            .scheme("http")
-            .authority(status_server.listening_addr().to_string().as_str())
-            .path_and_query("/config")
-            .build()
-            .unwrap();
-        let handle = status_server.thread_pool.spawn(async move {
-            let resp = client.get(uri).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK);
-            let mut v = Vec::new();
-            resp.into_body()
-                .try_for_each(|bytes| {
-                    v.extend(bytes);
-                    ok(())
-                })
-                .await
-                .unwrap();
-            let resp_json = String::from_utf8_lossy(&v).to_string();
-            let cfg = TikvConfig::default();
-            serde_json::to_string(&cfg.get_encoder())
-                .map(|cfg_json| {
-                    assert_eq!(resp_json, cfg_json);
-                })
-                .expect("Could not convert TikvConfig to string");
-        });
-        block_on(handle).unwrap();
-        status_server.stop();
-    }
-
-    #[cfg(feature = "failpoints")]
-    #[test]
-    fn test_status_service_fail_endpoints() {
-        let _guard = fail::FailScenario::setup();
-        let mut status_server = StatusServer::new(
-            1,
-            ConfigController::default(),
-            Arc::new(SecurityConfig::default()),
-            MockRouter,
-            std::env::temp_dir(),
-        )
-        .unwrap();
-        let addr = "127.0.0.1:0".to_owned();
-        let _ = status_server.start(addr);
-        let client = Client::new();
-        let addr = status_server.listening_addr().to_string();
-
-        let handle = status_server.thread_pool.spawn(async move {
-            // test add fail point
-            let uri = Uri::builder()
-                .scheme("http")
-                .authority(addr.as_str())
-                .path_and_query("/fail/test_fail_point_name")
-                .build()
-                .unwrap();
-            let mut req = Request::new(Body::from("panic"));
-            *req.method_mut() = Method::PUT;
-            *req.uri_mut() = uri;
-
-            let res = client.request(req).await.unwrap();
-            assert_eq!(res.status(), StatusCode::OK);
-            let list: Vec<String> = fail::list()
-                .into_iter()
-                .map(move |(name, actions)| format!("{}={}", name, actions))
-                .collect();
-            assert_eq!(list.len(), 1);
-            let list = list.join(";");
-            assert_eq!("test_fail_point_name=panic", list);
-
-            // test add another fail point
-            let uri = Uri::builder()
-                .scheme("http")
-                .authority(addr.as_str())
-                .path_and_query("/fail/and_another_name")
-                .build()
-                .unwrap();
-            let mut req = Request::new(Body::from("panic"));
-            *req.method_mut() = Method::PUT;
-            *req.uri_mut() = uri;
-
-            let res = client.request(req).await.unwrap();
-
-            assert_eq!(res.status(), StatusCode::OK);
-
-            let list: Vec<String> = fail::list()
-                .into_iter()
-                .map(move |(name, actions)| format!("{}={}", name, actions))
-                .collect();
-            assert_eq!(2, list.len());
-            let list = list.join(";");
-            assert!(list.contains("test_fail_point_name=panic"));
-            assert!(list.contains("and_another_name=panic"));
-
-            // test list fail points
-            let uri = Uri::builder()
-                .scheme("http")
-                .authority(addr.as_str())
-                .path_and_query("/fail")
-                .build()
-                .unwrap();
-            let mut req = Request::default();
-            *req.method_mut() = Method::GET;
-            *req.uri_mut() = uri;
-
-            let res = client.request(req).await.unwrap();
-            assert_eq!(res.status(), StatusCode::OK);
-            let mut body = Vec::new();
-            res.into_body()
-                .try_for_each(|bytes| {
-                    body.extend(bytes);
-                    ok(())
-                })
-                .await
-                .unwrap();
-            let body = String::from_utf8(body).unwrap();
-            assert!(body.contains("test_fail_point_name=panic"));
-            assert!(body.contains("and_another_name=panic"));
-
-            // test delete fail point
-            let uri = Uri::builder()
-                .scheme("http")
-                .authority(addr.as_str())
-                .path_and_query("/fail/test_fail_point_name")
-                .build()
-                .unwrap();
-            let mut req = Request::default();
-            *req.method_mut() = Method::DELETE;
-            *req.uri_mut() = uri;
-
-            let res = client.request(req).await.unwrap();
-            assert_eq!(res.status(), StatusCode::OK);
-
-            let list: Vec<String> = fail::list()
-                .into_iter()
-                .map(move |(name, actions)| format!("{}={}", name, actions))
-                .collect();
-            assert_eq!(1, list.len());
-            let list = list.join(";");
-            assert_eq!("and_another_name=panic", list);
-        });
-
-        block_on(handle).unwrap();
-        status_server.stop();
-    }
-
-    #[cfg(feature = "failpoints")]
-    #[test]
-    fn test_status_service_fail_endpoints_can_trigger_fails() {
-        let _guard = fail::FailScenario::setup();
-        let mut status_server = StatusServer::new(
-            1,
-            ConfigController::default(),
-            Arc::new(SecurityConfig::default()),
-            MockRouter,
-            std::env::temp_dir(),
-        )
-        .unwrap();
-        let addr = "127.0.0.1:0".to_owned();
-        let _ = status_server.start(addr);
-        let client = Client::new();
-        let addr = status_server.listening_addr().to_string();
-
-        let handle = status_server.thread_pool.spawn(async move {
-            // test add fail point
-            let uri = Uri::builder()
-                .scheme("http")
-                .authority(addr.as_str())
-                .path_and_query("/fail/a_test_fail_name_nobody_else_is_using")
-                .build()
-                .unwrap();
-            let mut req = Request::new(Body::from("return"));
-            *req.method_mut() = Method::PUT;
-            *req.uri_mut() = uri;
-
-            let res = client.request(req).await.unwrap();
-            assert_eq!(res.status(), StatusCode::OK);
-        });
-
-        block_on(handle).unwrap();
-        status_server.stop();
-
-        let true_only_if_fail_point_triggered = || {
-            fail_point!("a_test_fail_name_nobody_else_is_using", |_| { true });
-            false
-        };
-        assert!(true_only_if_fail_point_triggered());
-    }
-
-    #[cfg(not(feature = "failpoints"))]
-    #[test]
-    fn test_status_service_fail_endpoints_should_give_404_when_failpoints_are_disable() {
-        let _guard = fail::FailScenario::setup();
-        let mut status_server = StatusServer::new(
-            1,
-            ConfigController::default(),
-            Arc::new(SecurityConfig::default()),
-            MockRouter,
-            std::env::temp_dir(),
-        )
-        .unwrap();
-        let addr = "127.0.0.1:0".to_owned();
-        let _ = status_server.start(addr);
-        let client = Client::new();
-        let addr = status_server.listening_addr().to_string();
-
-        let handle = status_server.thread_pool.spawn(async move {
-            // test add fail point
-            let uri = Uri::builder()
-                .scheme("http")
-                .authority(addr.as_str())
-                .path_and_query("/fail/a_test_fail_name_nobody_else_is_using")
-                .build()
-                .unwrap();
-            let mut req = Request::new(Body::from("panic"));
-            *req.method_mut() = Method::PUT;
-            *req.uri_mut() = uri;
-
-            let res = client.request(req).await.unwrap();
-            // without feature "failpoints", this PUT endpoint should return 404
-            assert_eq!(res.status(), StatusCode::NOT_FOUND);
-        });
-
-        block_on(handle).unwrap();
-        status_server.stop();
-    }
-
-    fn do_test_security_status_service(allowed_cn: HashSet<String>, expected: bool) {
-        let mut status_server = StatusServer::new(
-            1,
-            ConfigController::default(),
-            Arc::new(new_security_cfg(Some(allowed_cn))),
-            MockRouter,
-            std::env::temp_dir(),
-        )
-        .unwrap();
-        let addr = "127.0.0.1:0".to_owned();
-        let _ = status_server.start(addr);
-
-        let mut connector = HttpConnector::new();
-        connector.enforce_http(false);
-        let mut ssl = SslConnector::builder(SslMethod::tls()).unwrap();
-        ssl.set_certificate_file(
-            format!(
-                "{}",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("components/test_util/data/server.pem")
-                    .display()
-            ),
-            SslFiletype::PEM,
-        )
-        .unwrap();
-        ssl.set_private_key_file(
-            format!(
-                "{}",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("components/test_util/data/key.pem")
-                    .display()
-            ),
-            SslFiletype::PEM,
-        )
-        .unwrap();
-        ssl.set_ca_file(format!(
-            "{}",
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("components/test_util/data/ca.pem")
-                .display()
-        ))
-        .unwrap();
-
-        let ssl = HttpsConnector::with_connector(connector, ssl).unwrap();
-        let client = Client::builder().build::<_, Body>(ssl);
-
-        let uri = Uri::builder()
-            .scheme("https")
-            .authority(status_server.listening_addr().to_string().as_str())
-            .path_and_query("/region")
-            .build()
-            .unwrap();
-
-        if expected {
-            let handle = status_server.thread_pool.spawn(async move {
-                let res = client.get(uri).await.unwrap();
-                assert_eq!(res.status(), StatusCode::NOT_FOUND);
-            });
-            block_on(handle).unwrap();
-        } else {
-            let handle = status_server.thread_pool.spawn(async move {
-                let res = client.get(uri).await.unwrap();
-                assert_eq!(res.status(), StatusCode::FORBIDDEN);
-            });
-            let _ = block_on(handle);
-        }
-        status_server.stop();
-    }
-
-    #[cfg(feature = "mem-profiling")]
-    #[test]
-    #[ignore]
-    fn test_pprof_heap_service() {
-        let mut status_server = StatusServer::new(
-            1,
-            ConfigController::default(),
-            Arc::new(SecurityConfig::default()),
-            MockRouter,
-            std::env::temp_dir(),
-        )
-        .unwrap();
-        let addr = "127.0.0.1:0".to_owned();
-        let _ = status_server.start(addr);
-        let client = Client::new();
-        let uri = Uri::builder()
-            .scheme("http")
-            .authority(status_server.listening_addr().to_string().as_str())
-            .path_and_query("/debug/pprof/heap?seconds=1")
-            .build()
-            .unwrap();
-        let handle = status_server
-            .thread_pool
-            .spawn(async move { client.get(uri).await.unwrap() });
-        let resp = block_on(handle).unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
-        status_server.stop();
-    }
-
-    #[test]
-    #[cfg(target_arch = "x86_64")]
-    fn test_pprof_profile_service() {
-        let _test_guard = TEST_PROFILE_MUTEX.lock().unwrap();
-        let mut status_server = StatusServer::new(
-            1,
-            ConfigController::default(),
-            Arc::new(SecurityConfig::default()),
-            MockRouter,
-            std::env::temp_dir(),
-        )
-        .unwrap();
-        let addr = "127.0.0.1:0".to_owned();
-        let _ = status_server.start(addr);
-        let client = Client::new();
-        let uri = Uri::builder()
-            .scheme("http")
-            .authority(status_server.listening_addr().to_string().as_str())
-            .path_and_query("/debug/pprof/profile?seconds=1&frequency=99")
-            .build()
-            .unwrap();
-        let handle = status_server
-            .thread_pool
-            .spawn(async move { client.get(uri).await.unwrap() });
-        let resp = block_on(handle).unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get("Content-Type").unwrap(),
-            &mime::IMAGE_SVG.to_string()
-        );
-        status_server.stop();
-    }
-
-    #[test]
-    fn test_change_log_level() {
-        let mut status_server = StatusServer::new(
-            1,
-            ConfigController::default(),
-            Arc::new(SecurityConfig::default()),
-            MockRouter,
-            std::env::temp_dir(),
-        )
-        .unwrap();
-        let addr = "127.0.0.1:0".to_owned();
-        let _ = status_server.start(addr);
-
-        let uri = Uri::builder()
-            .scheme("http")
-            .authority(status_server.listening_addr().to_string().as_str())
-            .path_and_query("/log-level")
-            .build()
-            .unwrap();
-
-        let new_log_level = slog::Level::Debug;
-        let mut log_level_request = Request::new(Body::from(
-            serde_json::to_string(&LogLevelRequest {
-                log_level: new_log_level,
-            })
-            .unwrap(),
-        ));
-        *log_level_request.method_mut() = Method::PUT;
-        *log_level_request.uri_mut() = uri;
-        log_level_request.headers_mut().insert(
-            hyper::header::CONTENT_TYPE,
-            hyper::header::HeaderValue::from_static("application/json"),
-        );
-
-        let handle = status_server.thread_pool.spawn(async move {
-            Client::new()
-                .request(log_level_request)
-                .await
-                .map(move |res| {
-                    assert_eq!(res.status(), StatusCode::OK);
-                    assert_eq!(get_log_level(), Some(new_log_level));
-                })
-                .unwrap()
-        });
-        block_on(handle).unwrap();
-        status_server.stop();
-    }
 }

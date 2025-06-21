@@ -27,6 +27,8 @@ cloud-aws = ["sst_importer/cloud-aws"]
 cloud-gcp = ["sst_importer/cloud-gcp"]
 cloud-azure = ["sst_importer/cloud-azure"]
 
+external-jemalloc = ["proxy_ffi/external-jemalloc"]
+
 [dependencies]
 batch-system = { workspace = true, default-features = false }
 bitflags = "1.0.1"

@@ -35,6 +35,8 @@ backup-stream-debug = ["proxy_server/backup-stream-debug"]
 
 pprof-fp = ["proxy_server/pprof-fp"]
 
+external-jemalloc = ["proxy_server/external-jemalloc"]
+
 [lib]
 name = "raftstore_proxy"
 crate-type = ["cdylib"]

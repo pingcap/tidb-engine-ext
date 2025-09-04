@@ -764,7 +764,7 @@ where
                             ));
                         }
 
-                        match (method, path.as_ref()) {
+                        let res = match (method, path.as_ref()) {
                             (Method::GET, "/metrics") => Ok(Response::new(
                                 dump(cfg_controller.get_current().server.simplify_metrics).into(),
                             )),
@@ -835,7 +835,16 @@ where
                                 StatusCode::NOT_FOUND,
                                 format!("path not found, {:?}", req),
                             )),
-                        }
+                        };
+                        let path_label = if is_unknown_path {
+                            "unknown".to_owned()
+                        } else {
+                            path
+                        };
+                        STATUS_REQUEST_DURATION
+                            .with_label_values(&[method.as_str(), &path_label])
+                            .observe(start.elapsed().as_secs_f64());
+                        res
                     }
                 }))
             }

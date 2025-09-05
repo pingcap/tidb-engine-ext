@@ -851,7 +851,7 @@ where
                                     StatusCode::NOT_FOUND,
                                     format!("path not found, {:?}", req),
                                 ))
-                            },
+                            }
                         };
                         let path_label = if is_unknown_path {
                             "unknown".to_owned()

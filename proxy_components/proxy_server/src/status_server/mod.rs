@@ -869,8 +869,8 @@ where
                             "/tiflash/remote/upload",
                         ];
 
-                        let get_tiflash_prefix = |path: &str| -> bool {
-                            PREFIXES.iter().find(|&&p| path.starts_with(p)).copied()
+                        let get_tiflash_prefix = |path: &str| -> Option<String> {
+                            TIFLASH_PREFIXES.iter().find(|&&p| path.starts_with(p)).copied()
                         };
                         match get_tiflash_prefix(method.as_str()) {
                             None => {

@@ -870,7 +870,10 @@ where
                         ];
 
                         let get_tiflash_prefix = |path: &str| -> Option<&'static str> {
-                            TIFLASH_PREFIXES.iter().find(|&&p| path.starts_with(p)).copied()
+                            TIFLASH_PREFIXES
+                                .iter()
+                                .find(|&&p| path.starts_with(p))
+                                .copied()
                         };
                         match get_tiflash_prefix(method.as_str()) {
                             None => {

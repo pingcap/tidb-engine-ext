@@ -877,7 +877,7 @@ where
                                 STATUS_REQUEST_DURATION
                                     .with_label_values(&[method.as_str(), &path_label])
                                     .observe(start.elapsed().as_secs_f64());
-                            },
+                            }
                             Some(s) => {
                                 STATUS_REQUEST_DURATION
                                     .with_label_values(&[s, &path_label])

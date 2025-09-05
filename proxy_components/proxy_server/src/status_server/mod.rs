@@ -858,9 +858,32 @@ where
                         } else {
                             path
                         };
-                        STATUS_REQUEST_DURATION
-                            .with_label_values(&[method.as_str(), &path_label])
-                            .observe(start.elapsed().as_secs_f64());
+                        const TIFLASH_PREFIXES: &[&str] = &[
+                            "/tiflash/sync-status",
+                            "/tiflash/sync-region",
+                            "/tiflash/sync-schema",
+                            "/tiflash/store-status",
+                            "/tiflash/remote/owner/info",
+                            "/tiflash/remote/owner/resign",
+                            "/tiflash/remote/gc",
+                            "/tiflash/remote/upload",
+                        ];
+
+                        let get_tiflash_prefix = |path: &str| -> bool {
+                            PREFIXES.iter().find(|&&p| path.starts_with(p)).copied()
+                        };
+                        match get_tiflash_prefix(method.as_str()) {
+                            None => {
+                                STATUS_REQUEST_DURATION
+                                    .with_label_values(&[method.as_str(), &path_label])
+                                    .observe(start.elapsed().as_secs_f64());
+                            },
+                            Some(s) => {
+                                STATUS_REQUEST_DURATION
+                                    .with_label_values(&[s, &path_label])
+                                    .observe(start.elapsed().as_secs_f64());
+                            }
+                        };
                         res
                     }
                 }))

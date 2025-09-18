@@ -814,7 +814,7 @@ where
                             }
                             // This interface is used for configuration file hosting scenarios,
                             // TiKV will not update configuration files, and this interface will
-                            // silently ignore configration items that cannot be updated online,
+                            // silently ignore configuration items that cannot be updated online,
                             // hand it over to the hosting platform for processing.
                             (Method::PUT, "/config/reload") => {
                                 Self::update_config_from_toml_file(cfg_controller.clone(), req)
@@ -853,12 +853,16 @@ where
                                 ))
                             }
                         };
-                        let path_label = if is_unknown_path {
-                            "unknown".to_owned()
-                        } else {
-                            path
-                        };
-                        const TIFLASH_PREFIXES: &[&str] = &[
+
+                        // limit the path label by prefix to reduce the number of labels
+                        // in prometheus
+                        const PROXY_PREFIXES: [&str; 2] = [
+                            "/region",
+                            "/log-level",
+                        ];
+                        // TODO: consider trim the tiflash prefix in tiflash FFI
+                        // calls to make it more easier to maintain.
+                        const TIFLASH_PREFIXES: [&str; 8] = [
                             "/tiflash/sync-status",
                             "/tiflash/sync-region",
                             "/tiflash/sync-schema",
@@ -868,25 +872,24 @@ where
                             "/tiflash/remote/gc",
                             "/tiflash/remote/upload",
                         ];
-
-                        let get_tiflash_prefix = |path: &str| -> Option<&'static str> {
-                            TIFLASH_PREFIXES
-                                .iter()
-                                .find(|&&p| path.starts_with(p))
-                                .copied()
-                        };
-                        match get_tiflash_prefix(method.as_str()) {
-                            None => {
-                                STATUS_REQUEST_DURATION
-                                    .with_label_values(&[method.as_str(), &path_label])
-                                    .observe(start.elapsed().as_secs_f64());
+                        let find_matching_prefix = |path: &str| -> String {
+                            if let Some(prefix) = PROXY_PREFIXES.iter().find(|&&p| path.starts_with(p)) {
+                                return prefix.to_string();
                             }
-                            Some(s) => {
-                                STATUS_REQUEST_DURATION
-                                    .with_label_values(&[s, &path_label])
-                                    .observe(start.elapsed().as_secs_f64());
+                            if let Some(prefix) = TIFLASH_PREFIXES.iter().find(|&&p| path.starts_with(p)) {
+                                return prefix.to_string();
                             }
+                            // If no prefix matches, return the original path
+                            path.to_string()
                         };
+                        let limited_path_label = if is_unknown_path {
+                            "unknown".to_owned()
+                        } else {
+                            find_matching_prefix(&path)
+                        };
+                        STATUS_REQUEST_DURATION
+                            .with_label_values(&[method.as_str(), &limited_path_label])
+                            .observe(start.elapsed().as_secs_f64());
                         res
                     }
                 }))

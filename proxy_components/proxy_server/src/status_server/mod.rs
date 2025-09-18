@@ -856,10 +856,7 @@ where
 
                         // limit the path label by prefix to reduce the number of labels
                         // in prometheus
-                        const PROXY_PREFIXES: [&str; 2] = [
-                            "/region",
-                            "/log-level",
-                        ];
+                        const PROXY_PREFIXES: [&str; 2] = ["/region", "/log-level"];
                         // TODO: consider trim the tiflash prefix in tiflash FFI
                         // calls to make it more easier to maintain.
                         const TIFLASH_PREFIXES: [&str; 8] = [
@@ -873,10 +870,14 @@ where
                             "/tiflash/remote/upload",
                         ];
                         let find_matching_prefix = |path: &str| -> String {
-                            if let Some(prefix) = PROXY_PREFIXES.iter().find(|&&p| path.starts_with(p)) {
+                            if let Some(prefix) =
+                                PROXY_PREFIXES.iter().find(|&&p| path.starts_with(p))
+                            {
                                 return prefix.to_string();
                             }
-                            if let Some(prefix) = TIFLASH_PREFIXES.iter().find(|&&p| path.starts_with(p)) {
+                            if let Some(prefix) =
+                                TIFLASH_PREFIXES.iter().find(|&&p| path.starts_with(p))
+                            {
                                 return prefix.to_string();
                             }
                             // If no prefix matches, return the original path

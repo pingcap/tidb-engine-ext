@@ -222,7 +222,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
 
         match cmd_type {
             AdminCmdType::CompactLog | AdminCmdType::ComputeHash | AdminCmdType::VerifyHash => {
-                info!(
+                debug!(
                     "observe useless admin command";
                     "region_id" => region_id,
                     "peer_id" => region_state.peer_id,

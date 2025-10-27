@@ -191,16 +191,19 @@ pub mod root {
             pub len: u64,
             pub type_: root::DB::RawCppPtrType,
         }
-        #[repr(u8)]
+        #[repr(u16)]
         #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
         pub enum HttpRequestStatus {
-            Ok = 0,
-            ErrorParam = 1,
+            Ok = 200,
+            BadRequest = 400,
+            NotFound = 404,
+            InternalError = 500,
         }
         #[repr(C)]
         #[derive(Debug)]
         pub struct HttpRequestRes {
             pub status: root::DB::HttpRequestStatus,
+            pub api_name: root::DB::CppStrWithView,
             pub res: root::DB::CppStrWithView,
         }
         #[repr(C)]
@@ -790,14 +793,7 @@ pub mod root {
                 ),
             >,
         }
-        extern "C" {
-            pub fn ffi_get_server_info_from_proxy(
-                arg1: isize,
-                arg2: root::DB::BaseBuffView,
-                arg3: root::DB::RawVoidPtr,
-            ) -> u32;
-        }
-        pub const RAFT_STORE_PROXY_VERSION: u64 = 2987646552689542817;
+        pub const RAFT_STORE_PROXY_VERSION: u64 = 14128502860884616546;
         pub const RAFT_STORE_PROXY_MAGIC_NUMBER: u32 = 324508639;
     }
 }

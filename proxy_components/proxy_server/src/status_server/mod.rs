@@ -18,7 +18,7 @@ use std::{
 
 use async_stream::stream;
 use collections::HashMap;
-use engine_store_ffi::ffi::interfaces_ffi::{EngineStoreServerHelper, HttpRequestStatus};
+use engine_store_ffi::ffi::interfaces_ffi::EngineStoreServerHelper;
 use engine_traits::KvEngine;
 use futures::{
     compat::{Compat01As03, Stream01CompatExt},
@@ -684,7 +684,7 @@ where
     pub async fn handle_http_request(
         req: Request<Body>,
         engine_store_server_helper: &'static EngineStoreServerHelper,
-    ) -> hyper::Result<Response<Body>> {
+    ) -> (hyper::Result<Response<Body>>, String) {
         let (head, body) = req.into_parts();
         let body = hyper::body::to_bytes(body).await;
 
@@ -695,27 +695,44 @@ where
                     head.uri.query(),
                     &s,
                 );
-                if res.status != HttpRequestStatus::Ok {
-                    return Ok(StatusServer::err_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "engine-store fails to build response".to_string(),
-                    ));
-                }
+                let resp_code = match StatusCode::from_u16(res.status as u16) {
+                    Ok(code) => code,
+                    Err(_) => {
+                        return (
+                            Ok(StatusServer::err_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "engine-store returns invalid status code".to_string(),
+                            )),
+                            "".to_string(),
+                        );
+                    }
+                };
 
                 let data = res.res.view.to_slice().to_vec();
-
-                match Response::builder().body(hyper::Body::from(data)) {
-                    Ok(resp) => Ok(resp),
-                    Err(err) => Ok(StatusServer::err_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("fails to build response: {}", err),
-                    )),
+                let api_prefix = std::str::from_utf8(res.api_name.view.to_slice())
+                    .unwrap_or("")
+                    .to_string();
+                match Response::builder()
+                    .status(resp_code)
+                    .body(hyper::Body::from(data))
+                {
+                    Ok(resp) => (Ok(resp), api_prefix),
+                    Err(err) => (
+                        Ok(StatusServer::err_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("fails to build response: {}", err),
+                        )),
+                        api_prefix,
+                    ),
                 }
             }
-            Err(err) => Ok(StatusServer::err_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("fails to build response: {}", err),
-            )),
+            Err(err) => (
+                Ok(StatusServer::err_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("fails to parse request body: {}", err),
+                )),
+                "".to_string(),
+            ),
         }
     }
 
@@ -776,7 +793,8 @@ where
                             ));
                         }
 
-                        let mut is_unknown_path = false;
+                        // The path_label reported in metrics
+                        let mut limited_path_label: String = path.clone();
                         let start = Instant::now();
                         let res = match (method.clone(), path.as_ref()) {
                             (Method::GET, "/metrics") => Ok(Response::new(
@@ -833,20 +851,32 @@ where
                                 Ok(Response::default())
                             }
                             (Method::GET, path) if path.starts_with("/region") => {
+                                // limit the path label by prefix to reduce the number of labels in
+                                // prometheus
+                                limited_path_label = "/region".to_owned();
                                 Self::dump_region_meta(req, router).await
                             }
                             (Method::PUT, path) if path.starts_with("/log-level") => {
+                                // limit the path label by prefix to reduce the number of labels in
+                                // prometheus
+                                limited_path_label = "/log-level".to_owned();
                                 Self::change_log_level(req).await
                             }
 
                             (Method::GET, path)
                                 if engine_store_server_helper.check_http_uri_available(path) =>
                             {
-                                Self::handle_http_request(req, engine_store_server_helper).await
+                                let (resp, api_prefix) =
+                                    Self::handle_http_request(req, engine_store_server_helper)
+                                        .await;
+                                // limit the path label by prefix to reduce the number of labels in
+                                // prometheus
+                                limited_path_label = api_prefix;
+                                resp
                             }
 
                             _ => {
-                                is_unknown_path = true;
+                                limited_path_label = "unknown".to_owned();
                                 Ok(make_response(
                                     StatusCode::NOT_FOUND,
                                     format!("path not found, {:?}", req),
@@ -854,40 +884,6 @@ where
                             }
                         };
 
-                        // limit the path label by prefix to reduce the number of labels
-                        // in prometheus
-                        const PROXY_PREFIXES: [&str; 2] = ["/region", "/log-level"];
-                        // TODO: consider trim the tiflash prefix in tiflash FFI
-                        // calls to make it more easier to maintain.
-                        const TIFLASH_PREFIXES: [&str; 8] = [
-                            "/tiflash/sync-status",
-                            "/tiflash/sync-region",
-                            "/tiflash/sync-schema",
-                            "/tiflash/store-status",
-                            "/tiflash/remote/owner/info",
-                            "/tiflash/remote/owner/resign",
-                            "/tiflash/remote/gc",
-                            "/tiflash/remote/upload",
-                        ];
-                        let find_matching_prefix = |path: &str| -> String {
-                            if let Some(prefix) =
-                                PROXY_PREFIXES.iter().find(|&&p| path.starts_with(p))
-                            {
-                                return prefix.to_string();
-                            }
-                            if let Some(prefix) =
-                                TIFLASH_PREFIXES.iter().find(|&&p| path.starts_with(p))
-                            {
-                                return prefix.to_string();
-                            }
-                            // If no prefix matches, return the original path
-                            path.to_string()
-                        };
-                        let limited_path_label = if is_unknown_path {
-                            "unknown".to_owned()
-                        } else {
-                            find_matching_prefix(&path)
-                        };
                         STATUS_REQUEST_DURATION
                             .with_label_values(&[method.as_str(), &limited_path_label])
                             .observe(start.elapsed().as_secs_f64());

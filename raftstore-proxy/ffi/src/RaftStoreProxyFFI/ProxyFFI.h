@@ -137,13 +137,18 @@ struct RawCppPtrArr {
   RawCppPtrType type;
 };
 
-enum class HttpRequestStatus : uint8_t {
-  Ok = 0,
-  ErrorParam,
+// HTTP request status codes
+// https://datatracker.ietf.org/doc/html/rfc7231#section-6.1
+enum class HttpRequestStatus : uint16_t {
+  Ok = 200,
+  BadRequest = 400,
+  NotFound = 404,
+  InternalError = 500,
 };
 
 struct HttpRequestRes {
   HttpRequestStatus status;
+  CppStrWithView api_name;
   CppStrWithView res;
 };
 

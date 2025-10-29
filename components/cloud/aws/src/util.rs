@@ -3,14 +3,14 @@ use std::{error::Error as StdError, io};
 
 use ::aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_config::{
+    ConfigLoader, Region,
     default_provider::credentials::DefaultCredentialsChain,
     environment::EnvironmentVariableRegionProvider,
     meta::region::{self, ProvideRegion, RegionProviderChain},
     profile::ProfileFileRegionProvider,
     provider_config::ProviderConfig,
-    ConfigLoader, Region,
 };
-use aws_credential_types::provider::{error::CredentialsError, ProvideCredentials};
+use aws_credential_types::provider::{ProvideCredentials, error::CredentialsError};
 use aws_sdk_kms::config::SharedHttpClient;
 use aws_sdk_s3::config::HttpClient;
 use aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder;
@@ -19,11 +19,9 @@ use futures::{Future, TryFutureExt};
 use hyper::Client;
 use hyper_tls::HttpsConnector;
 use tikv_util::{
-    stream::{block_on_external_io, retry_ext, RetryError, RetryExt},
+    stream::{RetryError, RetryExt, block_on_external_io, retry_ext},
     warn,
 };
-
-const READ_BUF_SIZE: usize = 1024 * 1024 * 2;
 
 const DEFAULT_REGION: &str = "us-east-1";
 
@@ -52,8 +50,7 @@ impl RetryError for CredentialsErrorWrapper {
 }
 
 pub fn new_http_client() -> SharedHttpClient {
-    let mut hyper_builder = Client::builder();
-    hyper_builder.http1_read_buf_exact_size(READ_BUF_SIZE);
+    let hyper_builder = Client::builder();
 
     HyperClientBuilder::new()
         .hyper_builder(hyper_builder)

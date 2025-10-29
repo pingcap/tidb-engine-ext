@@ -12,17 +12,17 @@ use std::{
 };
 
 use collections::HashSet;
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::{DashMap, mapref::entry::Entry};
 use encryption::{DataKeyManager, FileEncryptionInfo, MultiMasterKeyBackend};
 use encryption_export::create_async_backend;
 use engine_traits::{
-    name_to_cf, util::check_key_in_range, CfName, IterOptions, Iterator, KvEngine, RefIterable,
-    SstCompressionType, SstExt, SstMetaInfo, SstReader, SstWriter, SstWriterBuilder, CF_DEFAULT,
-    CF_WRITE,
+    CF_DEFAULT, CF_WRITE, CfName, IterOptions, Iterator, KvEngine, RefIterable, SstCompressionType,
+    SstExt, SstMetaInfo, SstReader, SstWriter, SstWriterBuilder, name_to_cf,
+    util::check_key_in_range,
 };
 use external_storage::{
-    compression_reader_dispatcher, encrypt_wrap_reader, wrap_with_checksum_reader_if_needed,
-    ExternalStorage, RestoreConfig,
+    ExternalStorage, RestoreConfig, compression_reader_dispatcher, encrypt_wrap_reader,
+    wrap_with_checksum_reader_if_needed,
 };
 use file_system::{IoType, OpenOptions};
 use kvproto::{
@@ -33,6 +33,7 @@ use kvproto::{
     metapb::Region,
 };
 use tikv_util::{
+    Either, HandyRwLock,
     codec::{
         bytes::{decode_bytes_in_place, encode_bytes},
         stream_event::{EventEncoder, EventIterator, Iterator as EIterator},
@@ -40,21 +41,21 @@ use tikv_util::{
     future::RescheduleChecker,
     memory::{MemoryQuota, OwnedAllocated},
     resizable_threadpool::DeamonRuntimeHandle,
-    sys::{thread::ThreadBuildWrapper, SysQuota},
+    sys::{SysQuota, thread::ThreadBuildWrapper},
     time::{Instant, Limiter},
-    Either, HandyRwLock,
 };
 use tokio::{runtime::Runtime, sync::OnceCell};
 use txn_types::{Key, TimeStamp, WriteRef};
 
 use crate::{
+    Config, ConfigManager as ImportConfigManager, Error, Result,
     caching::cache_map::{CacheMap, ShareOwned},
     import_file::{ImportDir, ImportFile},
     import_mode::{ImportModeSwitcher, RocksDbMetricsFn},
     import_mode2::{HashRange, ImportModeSwitcherV2},
     metrics::*,
     sst_writer::{RawSstWriter, TxnSstWriter},
-    util, Config, ConfigManager as ImportConfigManager, Error, Result,
+    util,
 };
 
 pub struct LoadedFile {
@@ -110,10 +111,10 @@ pub enum CacheKvFile {
 /// returns an error on an invalid internal state.
 /// pass the error back to the client side for further debugging.
 fn error(message: impl std::fmt::Display) -> Error {
-    Error::Io(io::Error::new(
-        ErrorKind::Other,
-        format!("internal error in TiKV: {}", message),
-    ))
+    Error::Io(io::Error::other(format!(
+        "internal error in TiKV: {}",
+        message
+    )))
 }
 
 impl CacheKvFile {
@@ -425,7 +426,7 @@ impl<E: KvEngine> SstImporter<E> {
                     "download failed";
                     "meta" => ?meta,
                     "name" => name,
-                    "err" => ?e,
+                    "err" => %e,
                 );
                 Err(e)
             }
@@ -487,6 +488,18 @@ impl<E: KvEngine> SstImporter<E> {
         backend: &StorageBackend,
         cache_id: &str,
     ) -> Result<Arc<dyn ExternalStorage>> {
+        // The `DashMap` locks the entry to ensure that only one thread loads the
+        // credentials at a time. However, if the thread gets blocked during the
+        // loading process, it can lead to a deadlock. To avoid this, blocking
+        // operations must be performed outside of the `DashMap`.
+        tokio::task::block_in_place(|| self.external_storage_or_cache_internal(backend, cache_id))
+    }
+
+    fn external_storage_or_cache_internal(
+        &self,
+        backend: &StorageBackend,
+        cache_id: &str,
+    ) -> Result<Arc<dyn ExternalStorage>> {
         // prepare to download the file from the external_storage
         // TODO: pass a config to support hdfs
         let ext_storage = if cache_id.is_empty() {
@@ -520,13 +533,7 @@ impl<E: KvEngine> SstImporter<E> {
             })?;
         }
 
-        // The `DashMap` locks the entry to ensure that only one thread loads the
-        // credentials at a time. However, if the thread gets blocked during the
-        // loading process, it can lead to a deadlock. To avoid this, blocking
-        // operations must be performed outside of the `DashMap`.
-        let ext_storage = tokio::task::block_in_place(move || {
-            self.external_storage_or_cache(backend, cache_key)
-        })?;
+        let ext_storage = self.external_storage_or_cache(backend, cache_key)?;
         let ext_storage = self.auto_encrypt_local_file_if_needed(ext_storage);
 
         let result = ext_storage
@@ -538,13 +545,44 @@ impl<E: KvEngine> SstImporter<E> {
                 restore_config,
             )
             .await;
-        IMPORTER_DOWNLOAD_BYTES.observe(file_length as _);
+
+        // Clean up temporary file if download failed
+        if let Err(ref err) = result {
+            warn!("download failed, cleaning up temporary file";
+                "src_file" => src_file_name,
+                "dst_file" => %dst_file.display(),
+                "error" => %err
+            );
+
+            // Attempt to remove the partially downloaded file
+            if dst_file.exists() {
+                if let Some(ref manager) = self.key_manager {
+                    if let Err(cleanup_err) = manager.delete_file(dst_file.to_str().unwrap(), None)
+                    {
+                        warn!("failed to remove encryption metadata for temporary file";
+                            "file" => %dst_file.display(),
+                            "error" => %cleanup_err
+                        );
+                    }
+                }
+                if let Err(cleanup_err) = file_system::remove_file(&dst_file) {
+                    warn!("failed to remove temporary file after download failure";
+                        "file" => %dst_file.display(),
+                        "error" => %cleanup_err
+                    );
+                }
+            }
+        }
+
         result.map_err(|e| Error::CannotReadExternalStorage {
             url: util::url_for(&ext_storage),
             name: src_file_name.to_owned(),
             local_path: dst_file.clone(),
             err: e,
         })?;
+
+        // Only record successful download bytes
+        IMPORTER_DOWNLOAD_BYTES.observe(file_length as _);
 
         OpenOptions::new()
             .append(true)
@@ -1735,18 +1773,17 @@ mod tests {
         io::{self, Cursor},
         ops::Sub,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Mutex,
+            atomic::{AtomicUsize, Ordering},
         },
-        usize,
     };
 
     use async_compression::tokio::write::ZstdEncoder;
     use encryption::{EncrypterWriter, Iv};
     use engine_rocks::get_env;
     use engine_traits::{
-        collect, Error as TraitError, ExternalSstFileInfo, Iterable, Iterator, RefIterable,
-        SstCompressionType::Zstd, SstReader, SstWriter, CF_DEFAULT, DATA_CFS,
+        CF_DEFAULT, DATA_CFS, Error as TraitError, ExternalSstFileInfo, Iterable, Iterator,
+        RefIterable, SstCompressionType::Zstd, SstReader, SstWriter, collect,
     };
     use external_storage::read_external_storage_info_buff;
     use file_system::Sha256Reader;
@@ -2311,7 +2348,7 @@ mod tests {
 
     #[test]
     fn test_read_external_storage_into_file_timed_out() {
-        use futures_util::stream::{pending, TryStreamExt};
+        use futures_util::stream::{TryStreamExt, pending};
 
         let mut input = pending::<io::Result<&[u8]>>().into_async_read();
         let mut output = Vec::new();
@@ -2398,7 +2435,7 @@ mod tests {
 
     #[test]
     fn test_read_external_storage_info_buff_timed_out() {
-        use futures_util::stream::{pending, TryStreamExt};
+        use futures_util::stream::{TryStreamExt, pending};
 
         let mut input = pending::<io::Result<&[u8]>>().into_async_read();
         let err = block_on_external_io(read_external_storage_info_buff(
@@ -3447,6 +3484,53 @@ mod tests {
     }
 
     #[test]
+    fn test_download_cleanup_on_failure() {
+        let ext_sst_dir = tempfile::tempdir().unwrap();
+        // Create an invalid/corrupted SST file that will cause download to fail
+        file_system::write(
+            ext_sst_dir.path().join("invalid.sst"),
+            b"invalid sst content",
+        )
+        .unwrap();
+
+        let mut meta = SstMeta::default();
+        meta.set_uuid(vec![0u8; 16]);
+        meta.set_length(100); // Set expected length different from actual file size
+
+        let importer_dir = tempfile::tempdir().unwrap();
+        let cfg = Config::default();
+        let importer =
+            SstImporter::<TestEngine>::new(&cfg, &importer_dir, None, ApiVersion::V1, false)
+                .unwrap();
+
+        let db = create_sst_test_engine().unwrap();
+        let backend = external_storage::make_local_backend(ext_sst_dir.path());
+
+        // Get the expected temporary file path
+        let temp_path = importer.dir.join_for_write(&meta).unwrap().temp;
+
+        // Attempt download - this should fail due to length mismatch
+        let result = importer.download(
+            &meta,
+            &backend,
+            "invalid.sst",
+            &RewriteRule::default(),
+            None,
+            Limiter::new(f64::INFINITY),
+            db,
+        );
+
+        // Verify download failed
+        result.unwrap_err();
+
+        // Verify temporary file was cleaned up
+        assert!(
+            !temp_path.exists(),
+            "temporary file should be cleaned up after download failure"
+        );
+    }
+
+    #[test]
     fn test_download_sst_empty() {
         let (_ext_sst_dir, backend, mut meta) = create_sample_external_sst_file().unwrap();
         let importer_dir = tempfile::tempdir().unwrap();
@@ -3976,5 +4060,40 @@ mod tests {
         if !in_mem {
             check_file_exists(&path.save, opt_key_manager.as_deref());
         }
+    }
+
+    #[test]
+    fn test_download_stuck() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+        let importer = SstImporter::<TestEngine>::new(
+            &Config::default(),
+            tempfile::tempdir().unwrap(),
+            None,
+            ApiVersion::V1,
+            false,
+        )
+        .unwrap();
+        let importer = Arc::from(importer);
+        fail::cfg("create_storage_slowly", "return").unwrap();
+        let mut joins = Vec::new();
+        for _ in 0..10 {
+            let importer_cloned = importer.clone();
+            let j = rt.spawn(async move {
+                let mut backend = StorageBackend::new();
+                backend.set_noop(Default::default());
+                importer_cloned.external_storage_or_cache(&backend, "test")
+            });
+            joins.push(j);
+        }
+        rt.block_on(async {
+            for j in joins {
+                let _ = j.await.unwrap();
+            }
+        });
+        fail::remove("create_storage_slowly");
     }
 }

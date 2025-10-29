@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{errors::Result, CfNamesExt};
+use crate::{CfNamesExt, errors::Result};
 
 #[derive(Clone, Debug)]
 pub struct ManualCompactionOptions {
@@ -96,6 +96,8 @@ pub trait CompactExt: CfNamesExt {
 }
 
 pub trait CompactedEvent: Send {
+    fn get_key_range(&self) -> (Vec<u8>, Vec<u8>);
+
     fn total_bytes_declined(&self) -> u64;
 
     fn is_size_declining_trivial(&self, split_check_diff: u64) -> bool;

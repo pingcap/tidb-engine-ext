@@ -1,8 +1,8 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 use encryption::DataKeyManager;
-use proxy_ffi::snapshot_reader_impls::{sst_file_reader::SSTFileReader, LockCFFileReader};
+use proxy_ffi::snapshot_reader_impls::{LockCFFileReader, sst_file_reader::SSTFileReader};
 
-use crate::core::{common::*, ProxyForwarder};
+use crate::core::{ProxyForwarder, common::*};
 
 pub fn get_first_key(
     path: &str,

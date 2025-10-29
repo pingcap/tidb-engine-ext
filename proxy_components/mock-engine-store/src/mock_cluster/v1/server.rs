@@ -3,13 +3,13 @@
 
 use std::{
     path::Path,
-    sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, atomic::AtomicU64},
     thread,
     time::Duration,
     usize,
 };
 
-use api_version::{dispatch_api_version, KvFormat};
+use api_version::{KvFormat, dispatch_api_version};
 use causal_ts::CausalTsProviderImpl;
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
@@ -33,17 +33,17 @@ use kvproto::{
 use pd_client::PdClient;
 use proxy_server::run::TiFlashGrpcMessageFilter;
 use raftstore::{
+    Result,
     coprocessor::{CoprocessorHost, RegionInfoAccessor},
     errors::Error as RaftError,
     router::{CdcRaftRouter, LocalReadRouter, RaftStoreRouter, ReadContext, ServerRaftStoreRouter},
     store::{
-        fsm::{store::StoreMeta, ApplyRouter, RaftBatchSystem, RaftRouter},
-        msg::RaftCmdExtraOpts,
         AutoSplitController, Callback, CheckLeaderRunner, DiskCheckRunner, LocalReader,
         RegionSnapshot, SnapManager, SnapManagerBuilder, SplitCheckRunner, SplitConfigManager,
         StoreMetaDelegate,
+        fsm::{ApplyRouter, RaftBatchSystem, RaftRouter, store::StoreMeta},
+        msg::RaftCmdExtraOpts,
     },
-    Result,
 };
 use resource_metering::{CollectorRegHandle, ResourceTagFactory};
 use security::SecurityManager;
@@ -55,40 +55,38 @@ use tikv::{
     import::{ImportSstService, SstImporter},
     read_pool::ReadPool,
     server::{
+        ConnectionBuilder, Error, MultiRaftServer, PdStoreAddrResolver, RaftClient, RaftKv,
+        Result as ServerResult, Server, ServerTransport,
         gc_worker::GcWorker,
         load_statistics::ThreadLoadPool,
         lock_manager::LockManager,
         raftkv::ReplicaReadLockChecker,
         resolve::{self, StoreAddrResolver},
         tablet_snap::NoSnapshotCache,
-        ConnectionBuilder, Error, MultiRaftServer, PdStoreAddrResolver, RaftClient, RaftKv,
-        Result as ServerResult, Server, ServerTransport,
     },
     storage::{
-        self,
+        self, Engine, Storage,
         kv::{FakeExtension, LocalTablets, SnapContext},
         txn::{
             flow_controller::{EngineFlowController, FlowController},
             txn_status_cache::TxnStatusCache,
         },
-        Engine, Storage,
     },
 };
 use tikv_util::{
-    box_err,
+    HandyRwLock, box_err,
     config::VersionTrack,
     quota_limiter::QuotaLimiter,
     sys::thread::ThreadBuildWrapper,
     thd_name,
     time::ThreadReadId,
     worker::{Builder as WorkerBuilder, LazyWorker},
-    HandyRwLock,
 };
 use tokio::runtime::Builder as TokioBuilder;
 use transport_simulate::SimulateTransport;
 use txn_types::TxnExtraScheduler;
 
-use super::{common::*, Cluster, Simulator, *};
+use super::{Cluster, Simulator, common::*, *};
 use crate::mock_cluster::v1::transport_simulate::Filter;
 
 type SimulateStoreTransport =

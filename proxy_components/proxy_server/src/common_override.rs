@@ -4,23 +4,23 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicU32, Ordering},
     },
     u64,
 };
 
 use encryption_export::DataKeyManager;
 use engine_rocks::{
-    raw::{Cache, Env},
     RocksEngine, RocksStatistics,
+    raw::{Cache, Env},
 };
 use engine_store_ffi::{self, TiFlashEngine};
 use engine_tiflash::PSLogEngine;
 use engine_traits::{
-    CfOptionsExt, Engines, FlowControlFactorsExt, RaftEngine, CF_DEFAULT, CF_LOCK, CF_WRITE,
+    CF_DEFAULT, CF_LOCK, CF_WRITE, CfOptionsExt, Engines, FlowControlFactorsExt, RaftEngine,
 };
-use file_system::{get_io_rate_limiter, File, IoBudgetAdjustor};
+use file_system::{File, IoBudgetAdjustor, get_io_rate_limiter};
 use raft_log_engine::RaftLogEngine;
 use server::{common::Stop, raft_engine_switch::*};
 use tikv::config::{ConfigController, DbConfigManger, DbType, TikvConfig};

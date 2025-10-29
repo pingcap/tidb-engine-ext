@@ -1,7 +1,7 @@
 use proxy_ffi::fatal;
 
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use crate::core::{common::*, ProxyForwarder};
+use crate::core::{ProxyForwarder, common::*};
 
 impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
     pub fn on_update_safe_ts(&self, region_id: u64, self_safe_ts: u64, leader_safe_ts: u64) {

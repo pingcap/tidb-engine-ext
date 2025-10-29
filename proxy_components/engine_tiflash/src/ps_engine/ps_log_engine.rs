@@ -9,8 +9,8 @@ use std::{
 };
 
 use engine_traits::{
-    Error, PerfContext, PerfContextExt, PerfContextKind, PerfLevel, RaftEngine, RaftEngineDebug,
-    RaftEngineReadOnly, RaftLogBatch, Result, RAFT_LOG_MULTI_GET_CNT,
+    Error, PerfContext, PerfContextExt, PerfContextKind, PerfLevel, RAFT_LOG_MULTI_GET_CNT,
+    RaftEngine, RaftEngineDebug, RaftEngineReadOnly, RaftLogBatch, Result,
 };
 use kvproto::{
     metapb::Region,

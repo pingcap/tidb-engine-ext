@@ -5,28 +5,27 @@ pub use std::{
     io::Write,
     ops::DerefMut,
     path::PathBuf,
-    sync::{atomic::Ordering, mpsc, Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, atomic::Ordering, mpsc},
     time::SystemTime,
 };
 
 pub use collections::HashMap;
 pub use engine_tiflash::{CachedRegionInfo, CachedRegionInfoManager};
-pub use engine_traits::{RaftEngine, SstMetaInfo, CF_LOCK, CF_RAFT};
+pub use engine_traits::{CF_LOCK, CF_RAFT, RaftEngine, SstMetaInfo};
 pub use kvproto::{
     metapb::Region,
     raft_cmdpb::{AdminCmdType, AdminRequest, AdminResponse, CmdType, RaftCmdRequest},
     raft_serverpb::{PeerState, RaftApplyState, RaftMessage, RegionLocalState},
 };
 pub use protobuf::Message;
-pub use raft::{eraftpb, eraftpb::MessageType, StateRole};
+pub use raft::{StateRole, eraftpb, eraftpb::MessageType};
 pub use raftstore::{
+    Error as RaftStoreError, Result as RaftStoreResult,
     coprocessor::{ApplyCtxInfo, Cmd, RegionChangeEvent, RegionState, RoleChange, StoreSizeInfo},
     store::{
-        self, check_sst_for_ingestion,
-        snap::{plain_file_used, SnapEntry},
-        SnapKey, SnapManager, Transport,
+        self, SnapKey, SnapManager, Transport, check_sst_for_ingestion,
+        snap::{SnapEntry, plain_file_used},
     },
-    Error as RaftStoreError, Result as RaftStoreResult,
 };
 pub use sst_importer::SstImporter;
 pub use tikv_util::{box_err, crit, debug, defer, error, info, store::find_peer, warn};
@@ -36,13 +35,13 @@ pub use yatp::{
 };
 
 pub(crate) use crate::{
+    TiFlashEngine,
     ffi::{
-        gen_engine_store_server_helper,
+        WriteCmds, gen_engine_store_server_helper,
         interfaces_ffi::{
             ColumnFamilyType, EngineStoreApplyRes, EngineStoreServerHelper, RaftCmdHeader,
             RawCppPtr, WriteCmdType,
         },
-        name_to_cf, WriteCmds,
+        name_to_cf,
     },
-    TiFlashEngine,
 };

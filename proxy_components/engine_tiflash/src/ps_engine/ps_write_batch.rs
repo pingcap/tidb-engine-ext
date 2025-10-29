@@ -5,8 +5,8 @@ use engine_traits::{self, Result, WriteOptions};
 use proxy_ffi::interfaces_ffi::RawCppPtr;
 
 use crate::{
-    mixed_engine::{elementary::ElementaryWriteBatch, write_batch::RocksWriteBatchVec},
     PageStorageExt,
+    mixed_engine::{elementary::ElementaryWriteBatch, write_batch::RocksWriteBatchVec},
 };
 
 pub struct PSElementWriteBatch {

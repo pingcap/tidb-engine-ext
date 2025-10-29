@@ -2,10 +2,10 @@
 
 use pd_client::PdClient;
 use proxy_server::config::{
-    address_proxy_config, ensure_no_common_unrecognized_keys, get_last_config,
-    setup_default_tikv_config, validate_and_persist_config, TIFLASH_DEFAULT_LISTENING_ADDR,
+    TIFLASH_DEFAULT_LISTENING_ADDR, address_proxy_config, ensure_no_common_unrecognized_keys,
+    get_last_config, setup_default_tikv_config, validate_and_persist_config,
 };
-use tikv::config::{TikvConfig, LAST_CONFIG_FILE};
+use tikv::config::{LAST_CONFIG_FILE, TikvConfig};
 
 use crate::utils::v1::*;
 

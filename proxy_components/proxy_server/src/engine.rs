@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use engine_store_ffi::TiFlashEngine;
 use engine_tiflash::DB;
-use engine_traits::{CfOptionsExt, DbOptions, DbOptionsExt, CF_DEFAULT};
+use engine_traits::{CF_DEFAULT, CfOptionsExt, DbOptions, DbOptionsExt};
 use tikv::config::ConfigurableDb;
 
 #[derive(Clone, Debug)]

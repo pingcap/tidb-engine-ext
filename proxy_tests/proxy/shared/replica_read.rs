@@ -1,10 +1,9 @@
 use std::{collections::hash_map::Entry, pin::Pin, sync::Mutex, time::Duration};
 
 use engine_store_ffi::ffi::{
-    ffi_gc_rust_ptr, ffi_make_async_waker, ffi_make_read_index_task, ffi_make_timer_task,
-    ffi_poll_read_index_task, ffi_poll_timer_task,
+    ProtoMsgBaseBuff, ffi_gc_rust_ptr, ffi_make_async_waker, ffi_make_read_index_task,
+    ffi_make_timer_task, ffi_poll_read_index_task, ffi_poll_timer_task,
     interfaces_ffi::{RaftStoreProxyFFIHelper, RawRustPtr, RawVoidPtr},
-    ProtoMsgBaseBuff,
 };
 
 use crate::utils::v1::*;
@@ -365,7 +364,7 @@ use kvproto::{
 };
 use raftstore::{
     router::RaftStoreRouter,
-    store::{msg::Callback, RaftCmdExtraOpts, ReadIndexContext},
+    store::{RaftCmdExtraOpts, ReadIndexContext, msg::Callback},
 };
 use tokio::sync::oneshot;
 use txn_types::{Key, Lock, LockType};

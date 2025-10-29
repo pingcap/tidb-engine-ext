@@ -2,8 +2,8 @@
 use std::{
     fmt::Formatter,
     sync::{
-        atomic::{AtomicIsize, Ordering},
         Arc,
+        atomic::{AtomicIsize, Ordering},
     },
 };
 

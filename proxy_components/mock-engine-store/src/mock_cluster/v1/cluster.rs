@@ -11,9 +11,9 @@ use std::{
 use collections::{HashMap, HashSet};
 use encryption::DataKeyManager;
 // mock cluster
-use engine_traits::{Engines, KvEngine, CF_DEFAULT};
+use engine_traits::{CF_DEFAULT, Engines, KvEngine};
 use file_system::IoRateLimiter;
-use futures::{executor::block_on, future::BoxFuture, StreamExt};
+use futures::{StreamExt, executor::block_on, future::BoxFuture};
 use kvproto::{
     errorpb::Error as PbError,
     metapb::{self, PeerRole, RegionEpoch, StoreLabel},
@@ -23,21 +23,20 @@ use kvproto::{
 };
 use pd_client::PdClient;
 use raftstore::{
+    Error, Result,
     router::RaftStoreRouter,
     store::{
-        bootstrap_store,
+        Callback, CasualMessage, CasualRouter, INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
+        RaftCmdExtraOpts, RaftRouter, ReadResponse, SnapManager, StoreMsg, StoreRouter,
+        WriteResponse, bootstrap_store,
         fsm::{
-            create_raft_batch_system,
-            store::{StoreMeta, PENDING_MSG_CAP},
-            RaftBatchSystem,
+            RaftBatchSystem, create_raft_batch_system,
+            store::{PENDING_MSG_CAP, StoreMeta},
         },
         initial_region,
         msg::StoreTick,
-        prepare_bootstrap_cluster, Callback, CasualMessage, CasualRouter, RaftCmdExtraOpts,
-        RaftRouter, ReadResponse, SnapManager, StoreMsg, StoreRouter, WriteResponse,
-        INIT_EPOCH_CONF_VER, INIT_EPOCH_VER,
+        prepare_bootstrap_cluster,
     },
-    Error, Result,
 };
 use resource_control::ResourceGroupManager;
 use tempfile::TempDir;
@@ -49,12 +48,12 @@ use test_raftstore::{
 };
 use tikv::server::Result as ServerResult;
 use tikv_util::{
-    debug, error,
+    HandyRwLock, debug, error,
     mpsc::future,
     safe_panic,
     thread_group::GroupProperties,
     time::{Instant, ThreadReadId},
-    warn, HandyRwLock,
+    warn,
 };
 use tokio::sync::oneshot;
 use txn_types::WriteBatchFlags;

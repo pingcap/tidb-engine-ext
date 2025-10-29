@@ -3,12 +3,12 @@
 use std::{
     convert::Infallible,
     net::SocketAddr,
-    sync::{atomic::AtomicUsize, Arc, RwLock},
+    sync::{Arc, RwLock, atomic::AtomicUsize},
 };
 
 use hyper::{
-    service::{make_service_fn, service_fn},
     Body, Response, Server,
+    service::{make_service_fn, service_fn},
 };
 use proxy_ffi::interfaces_ffi::RaftstoreVer;
 use tokio::{runtime::Runtime, sync::oneshot, task::JoinHandle};

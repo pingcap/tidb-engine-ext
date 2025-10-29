@@ -11,7 +11,7 @@ use clap::{App, Arg};
 use tikv::config::TikvConfig;
 
 use crate::{
-    config::{make_tikv_config, ProxyConfig},
+    config::{ProxyConfig, make_tikv_config},
     fatal,
     setup::overwrite_config_with_cmd_args,
 };

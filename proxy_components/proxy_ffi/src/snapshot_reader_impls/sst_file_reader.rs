@@ -2,7 +2,7 @@
 use std::{cell::RefCell, sync::Arc};
 
 use encryption::DataKeyManager;
-use engine_rocks::{get_env, RocksSstIterator, RocksSstReader};
+use engine_rocks::{RocksSstIterator, RocksSstReader, get_env};
 use engine_traits::{IterOptions, Iterator, RefIterable, SstReader};
 
 use crate::interfaces_ffi::{

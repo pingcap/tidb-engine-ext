@@ -3,7 +3,7 @@
 use proxy_ffi::interfaces_ffi::SSTReaderPtr;
 
 use crate::{
-    core::{common::*, PrehandleTask, ProxyForwarder, PtrWrapper},
+    core::{PrehandleTask, ProxyForwarder, PtrWrapper, common::*},
     fatal,
 };
 

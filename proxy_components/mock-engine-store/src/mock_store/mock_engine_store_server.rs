@@ -3,7 +3,7 @@
 use std::{
     cell::RefCell,
     pin::Pin,
-    sync::{atomic::Ordering, Mutex},
+    sync::{Mutex, atomic::Ordering},
 };
 
 use engine_store_ffi::TiFlashEngine;

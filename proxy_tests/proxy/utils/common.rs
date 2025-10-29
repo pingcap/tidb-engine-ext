@@ -4,14 +4,14 @@ pub use std::{
     ops::DerefMut,
     path::{Path, PathBuf},
     str::FromStr,
-    sync::{atomic::Ordering, mpsc, Arc, RwLock},
+    sync::{Arc, RwLock, atomic::Ordering, mpsc},
 };
 
 pub use collections::HashSet;
-pub use engine_store_ffi::ffi::{interfaces_ffi::KVGetStatus, RaftStoreProxyFFI};
+pub use engine_store_ffi::ffi::{RaftStoreProxyFFI, interfaces_ffi::KVGetStatus};
 pub use engine_traits::{
-    MiscExt, Mutable, Peekable, RaftEngineDebug, RaftLogBatch, WriteBatch, CF_DEFAULT, CF_LOCK,
-    CF_RAFT, CF_WRITE,
+    CF_DEFAULT, CF_LOCK, CF_RAFT, CF_WRITE, MiscExt, Mutable, Peekable, RaftEngineDebug,
+    RaftLogBatch, WriteBatch,
 };
 pub use futures::executor::block_on;
 pub use kvproto::{
@@ -22,23 +22,22 @@ pub use kvproto::{
     raft_serverpb::{PeerState, RaftApplyState, RaftLocalState, RegionLocalState, StoreIdent},
 };
 pub use mock_engine_store::{
-    general_get_apply_state, general_get_raft_local_state, general_get_region_local_state,
-    make_new_region,
+    RegionStats, general_get_apply_state, general_get_raft_local_state,
+    general_get_region_local_state, make_new_region,
     mock_cluster::{
-        config::MixedClusterConfig, test_utils::*, ClusterExt, FFIHelperSet, ProxyConfig,
+        ClusterExt, FFIHelperSet, ProxyConfig, config::MixedClusterConfig, test_utils::*,
     },
-    write_kv_in_mem, RegionStats,
+    write_kv_in_mem,
 };
 pub use pd_client::PdClient;
 pub use raft::eraftpb::{ConfChangeType, MessageType};
 pub use raftstore::coprocessor::ConsistencyCheckMethod;
 pub use test_pd_client::TestPdClient;
 pub use tikv_util::{
-    box_err, box_try,
+    HandyRwLock, box_err, box_try,
     config::{ReadableDuration, ReadableSize},
     store::{find_peer, find_peer_by_id},
     time::Duration,
-    HandyRwLock,
 };
 
 pub fn new_compute_hash_request() -> AdminRequest {

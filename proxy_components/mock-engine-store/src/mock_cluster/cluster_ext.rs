@@ -1,12 +1,12 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::sync::{atomic::AtomicU8, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicU8};
 
 use collections::HashMap;
 use encryption::DataKeyManager;
 use engine_store_ffi::{
-    ffi::interfaces_ffi::{EngineStoreServerHelper, RaftProxyStatus, RaftStoreProxyFFIHelper},
     TiFlashEngine,
+    ffi::interfaces_ffi::{EngineStoreServerHelper, RaftProxyStatus, RaftStoreProxyFFIHelper},
 };
 use engine_traits::Engines;
 use raftstore::store::RaftRouter;
@@ -15,8 +15,8 @@ use tikv_util::{debug, sys::SysQuota};
 
 use super::common::*;
 use crate::{
-    mock_cluster::config::MockConfig, mock_store::gen_engine_store_server_helper,
-    EngineStoreServer, EngineStoreServerWrap,
+    EngineStoreServer, EngineStoreServerWrap, mock_cluster::config::MockConfig,
+    mock_store::gen_engine_store_server_helper,
 };
 
 pub struct EngineHelperSet {

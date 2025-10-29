@@ -18,7 +18,7 @@ use proxy_ffi::{
     snapshot_reader_impls::{tablet_reader::TabletReader, *},
 };
 use raft::eraftpb::Snapshot;
-use raftstore::store::{snap::TABLET_SNAPSHOT_VERSION, TabletSnapKey, TabletSnapManager};
+use raftstore::store::{TabletSnapKey, TabletSnapManager, snap::TABLET_SNAPSHOT_VERSION};
 use rand::Rng;
 use test_raftstore::RawEngine;
 use test_raftstore_v2::{Simulator as S2, WrapFactory};

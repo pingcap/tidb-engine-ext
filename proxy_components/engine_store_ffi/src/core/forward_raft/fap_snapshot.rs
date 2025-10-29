@@ -1,7 +1,7 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
 use crate::{
-    core::{common::*, ProxyForwarder},
+    core::{ProxyForwarder, common::*},
     fatal,
 };
 

@@ -2,7 +2,7 @@
 
 use std::{
     ops::{Deref, DerefMut},
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use tikv::config::TikvConfig;

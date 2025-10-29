@@ -8,7 +8,7 @@ use file_system::IoRateLimiter;
 use raftstore::store::RaftRouter;
 use tempfile::TempDir;
 
-use super::{common::*, Cluster, Simulator};
+use super::{Cluster, Simulator, common::*};
 
 pub fn create_tiflash_test_engine_with_cluster_ctx<T: Simulator<TiFlashEngine>>(
     cluster: &mut Cluster<T>,

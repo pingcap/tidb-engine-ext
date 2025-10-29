@@ -3,7 +3,7 @@
 use std::{
     marker::PhantomData,
     mem,
-    sync::{atomic::*, mpsc::Sender, Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock, atomic::*, mpsc::Sender},
     thread, time,
     time::Duration,
     usize,
@@ -15,14 +15,14 @@ use engine_traits::KvEngine;
 use kvproto::{raft_cmdpb::RaftCmdRequest, raft_serverpb::RaftMessage};
 use raft::eraftpb::MessageType;
 use raftstore::{
+    DiscardReason, Error, Result as RaftStoreResult, Result,
     router::{LocalReadRouter, RaftStoreRouter, ReadContext},
     store::{
         Callback, CasualMessage, CasualRouter, PeerMsg, ProposalRouter, RaftCommand,
         SignificantMsg, SignificantRouter, StoreMsg, StoreRouter, Transport,
     },
-    DiscardReason, Error, Result as RaftStoreResult, Result,
 };
-use tikv_util::{error, Either, HandyRwLock};
+use tikv_util::{Either, HandyRwLock, error};
 
 pub fn check_messages(msgs: &[RaftMessage]) -> Result<()> {
     if msgs.is_empty() {

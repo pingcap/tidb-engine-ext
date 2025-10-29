@@ -5,6 +5,10 @@ license = "Apache-2.0"
 edition = "2021"
 publish = false
 
+[lib]
+name = "raftstore_proxy"
+crate-type = ["cdylib"]
+
 [features]
 tcmalloc = ["proxy_server/tcmalloc"]
 jemalloc = ["proxy_server/jemalloc"]
@@ -18,28 +22,16 @@ failpoints = ["proxy_server/failpoints"]
 # cloud-aws = ["proxy_server/cloud-aws"]
 # cloud-gcp = ["proxy_server/cloud-gcp"]
 # cloud-azure = ["proxy_server/cloud-azure"]
-test-engine-kv-rocksdb = [
-  "proxy_server/test-engine-kv-rocksdb"
-]
-test-engine-raft-raft-engine = [
-  "proxy_server/test-engine-raft-raft-engine"
-]
-test-engines-rocksdb = [
-  "proxy_server/test-engines-rocksdb",
-]
-test-engines-panic = [
-  "proxy_server/test-engines-panic",
-]
+test-engine-kv-rocksdb = ["proxy_server/test-engine-kv-rocksdb"]
+test-engine-raft-raft-engine = ["proxy_server/test-engine-raft-raft-engine"]
+test-engines-rocksdb = ["proxy_server/test-engines-rocksdb"]
+test-engines-panic = ["proxy_server/test-engines-panic"]
 nortcheck = ["proxy_server/nortcheck"]
 backup-stream-debug = ["proxy_server/backup-stream-debug"]
 
 pprof-fp = ["proxy_server/pprof-fp"]
 openssl-vendored = ["proxy_server/openssl-vendored"]
 external-jemalloc = ["proxy_server/external-jemalloc"]
-
-[lib]
-name = "raftstore_proxy"
-crate-type = ["cdylib"]
 
 [dependencies]
 proxy_server = { workspace = true }

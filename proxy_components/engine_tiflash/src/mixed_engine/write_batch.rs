@@ -5,10 +5,10 @@
 use std::sync::Arc;
 
 use engine_traits::{self, Mutable, Result, WriteBatchExt, WriteOptions};
-use rocksdb::{Writable, WriteBatch as RawWriteBatch, DB};
+use rocksdb::{DB, Writable, WriteBatch as RawWriteBatch};
 
 use super::elementary::ElementaryWriteBatch;
-use crate::{options::RocksWriteOptions, r2e, util::get_cf_handle, RocksEngine};
+use crate::{RocksEngine, options::RocksWriteOptions, r2e, util::get_cf_handle};
 
 const WRITE_BATCH_MAX_BATCH: usize = 16;
 const WRITE_BATCH_LIMIT: usize = 16;

@@ -9,9 +9,9 @@ use engine_store_ffi::ffi::interfaces_ffi::{BaseBuffView, RaftStoreProxyPtr, Raw
 use futures::{compat::Future01CompatExt, executor::block_on};
 use kvproto::diagnosticspb::{ServerInfoRequest, ServerInfoResponse, ServerInfoType};
 use protobuf::Message;
-use tikv::server::service::diagnostics::{sys, SYS_INFO};
+use tikv::server::service::diagnostics::{SYS_INFO, sys};
 use tikv_util::{
-    sys::{ioload, SystemExt},
+    sys::{SystemExt, ioload},
     timer::GLOBAL_TIMER_HANDLE,
 };
 

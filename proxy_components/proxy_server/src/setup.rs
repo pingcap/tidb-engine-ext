@@ -3,7 +3,7 @@ use std::borrow::ToOwned;
 
 use clap::ArgMatches;
 pub use server::setup::initial_logger;
-use tikv::config::{MetricConfig, TikvConfig, MEMORY_USAGE_LIMIT_RATE};
+use tikv::config::{MEMORY_USAGE_LIMIT_RATE, MetricConfig, TikvConfig};
 use tikv_util::{self, config::ReadableSize, logger, sys::SysQuota};
 
 use crate::config::ProxyConfig;

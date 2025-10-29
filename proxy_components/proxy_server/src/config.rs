@@ -8,7 +8,7 @@ use itertools::Itertools;
 use online_config::OnlineConfig;
 use serde_derive::{Deserialize, Serialize};
 use serde_with::with_prefix;
-use tikv::config::{TikvConfig, LAST_CONFIG_FILE};
+use tikv::config::{LAST_CONFIG_FILE, TikvConfig};
 use tikv_util::{
     config::{ReadableDuration, ReadableSize},
     crit,

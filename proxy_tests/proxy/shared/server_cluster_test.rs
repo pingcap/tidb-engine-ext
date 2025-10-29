@@ -2,7 +2,7 @@
 
 use std::{error::Error, net::SocketAddr, sync::Arc};
 
-use hyper::{body, Client, StatusCode, Uri};
+use hyper::{Client, StatusCode, Uri, body};
 use proxy_server::status_server::StatusServer;
 use security::SecurityConfig;
 use tikv::config::ConfigController;

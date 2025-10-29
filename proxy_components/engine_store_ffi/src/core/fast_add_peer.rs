@@ -1,6 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 use crate::{
-    core::{common::*, serverless_extra::*, ProxyForwarder},
+    core::{ProxyForwarder, common::*, serverless_extra::*},
     ffi::interfaces_ffi::FastAddPeerStatus,
 };
 

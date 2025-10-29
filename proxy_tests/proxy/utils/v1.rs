@@ -2,14 +2,14 @@
 #![allow(dead_code)]
 #![allow(unused_variables)]
 
+use mock_engine_store::mock_cluster::TiFlashEngine;
 pub use mock_engine_store::mock_cluster::v1::{
+    Cluster, Simulator,
     node::NodeCluster,
     transport_simulate::{
         CloneFilterFactory, CollectSnapshotFilter, Direction, RegionPacketFilter,
     },
-    Cluster, Simulator,
 };
-use mock_engine_store::mock_cluster::TiFlashEngine;
 use rand::seq::SliceRandom;
 use sst_importer::SstImporter;
 use test_sst_importer::gen_sst_file_with_kvs;

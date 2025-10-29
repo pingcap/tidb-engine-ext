@@ -9,13 +9,13 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use chrono::{offset::Local, DateTime};
+use chrono::{DateTime, offset::Local};
 use futures::{
+    Future, FutureExt, Stream, StreamExt,
     channel::oneshot::{self, Sender},
     future::BoxFuture,
     select,
     task::{Context, Poll},
-    Future, FutureExt, Stream, StreamExt,
 };
 use lazy_static::lazy_static;
 use pprof::protos::Message;
@@ -434,7 +434,7 @@ fn last_change_epoch(metadata: &Metadata) -> u64 {
 mod tests {
     use std::sync::mpsc::sync_channel;
 
-    use futures::{channel::mpsc, executor::block_on, SinkExt};
+    use futures::{SinkExt, channel::mpsc, executor::block_on};
     use tokio::runtime;
 
     use super::*;
@@ -460,7 +460,7 @@ mod tests {
     fn test_profile_guard_concurrency() {
         use std::{thread, time::Duration};
 
-        use futures::{channel::oneshot, TryFutureExt};
+        use futures::{TryFutureExt, channel::oneshot};
 
         let _test_guard = TEST_PROFILE_MUTEX.lock().unwrap();
         let rt = runtime::Builder::new_multi_thread()

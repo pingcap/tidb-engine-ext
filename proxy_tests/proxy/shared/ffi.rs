@@ -1,9 +1,8 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use engine_store_ffi::ffi::{
-    ffi_gc_rust_ptr, get_engine_store_server_helper,
+    TEST_GC_OBJ_MONITOR, UnwrapExternCFunc, ffi_gc_rust_ptr, get_engine_store_server_helper,
     interfaces_ffi::{RawCppPtr, RawCppPtrArr, RawCppPtrTuple, RawVoidPtr, RustStrWithView},
-    UnwrapExternCFunc, TEST_GC_OBJ_MONITOR,
 };
 use mock_engine_store::{mock_cluster::init_global_ffi_helper_set, mock_store::RawCppPtrTypeImpl};
 use proxy_ffi::build_from_string;

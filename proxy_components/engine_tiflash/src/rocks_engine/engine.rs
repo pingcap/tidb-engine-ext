@@ -7,8 +7,8 @@ use rocksdb::Writable;
 
 use crate::{
     mixed_engine::{
-        elementary::{ElementaryEngine, ElementaryWriteBatch},
         MixedDbVector,
+        elementary::{ElementaryEngine, ElementaryWriteBatch},
     },
     r2e,
     util::get_cf_handle,

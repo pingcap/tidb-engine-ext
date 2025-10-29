@@ -118,7 +118,7 @@ pub fn get_deallocate() -> u64 {
     issue_mallctl("thread.deallocated")
 }
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 struct CaptureContext {
     buffer: Mutex<String>,
 }

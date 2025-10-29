@@ -22,8 +22,8 @@ use raftstore::{
 use sst_importer::SstImporter;
 
 use crate::{
-    core::{DebugStruct, PackedEnvs, ProxyForwarder},
     TiFlashEngine,
+    core::{DebugStruct, PackedEnvs, ProxyForwarder},
 };
 
 // TiFlash observer's priority should be higher than all other observers, to

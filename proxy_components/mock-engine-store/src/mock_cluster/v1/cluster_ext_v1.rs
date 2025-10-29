@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use collections::HashMap;
-use engine_store_ffi::{ffi::RaftStoreProxyFFI, TiFlashEngine};
+use engine_store_ffi::{TiFlashEngine, ffi::RaftStoreProxyFFI};
 use engine_tiflash::DB;
 use engine_traits::{Engines, KvEngine};
-use tikv_util::{sys::SysQuota, HandyRwLock};
+use tikv_util::{HandyRwLock, sys::SysQuota};
 
-use super::{common::*, Cluster, Simulator};
+use super::{Cluster, Simulator, common::*};
 
 impl<T: Simulator<TiFlashEngine>> Cluster<T> {
     pub fn access_ffi_helpers(&self, f: &mut dyn FnMut(&mut HashMap<u64, FFIHelperSet>)) {

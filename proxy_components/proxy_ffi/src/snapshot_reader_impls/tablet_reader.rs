@@ -2,8 +2,8 @@
 use std::{cell::RefCell, sync::Arc};
 
 use encryption::DataKeyManager;
-use engine_rocks::{get_env, RocksCfOptions, RocksDbOptions};
-use engine_traits::{Iterable, Iterator, RangePropertiesExt, CF_WRITE};
+use engine_rocks::{RocksCfOptions, RocksDbOptions, get_env};
+use engine_traits::{CF_WRITE, Iterable, Iterator, RangePropertiesExt};
 
 use crate::{
     build_from_vec_string, cf_to_name,

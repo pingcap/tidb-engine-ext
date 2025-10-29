@@ -4,12 +4,11 @@ use encryption::FileEncryptionInfo;
 use kvproto::encryptionpb::EncryptionMethod;
 
 use super::{
-    get_engine_store_server_helper,
+    RaftStoreProxyFFI, get_engine_store_server_helper,
     interfaces_ffi::{
         BaseBuffView, EncryptionMethod as EncryptionMethodImpl, FileEncryptionInfoRaw,
         FileEncryptionRes, RaftStoreProxyPtr, RawCppStringPtr,
     },
-    RaftStoreProxyFFI,
 };
 
 impl From<EncryptionMethod> for EncryptionMethodImpl {

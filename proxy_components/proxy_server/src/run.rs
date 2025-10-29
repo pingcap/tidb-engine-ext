@@ -7,39 +7,39 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicU8},
-        mpsc, Arc, Mutex,
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU8, AtomicU64},
+        mpsc,
     },
     thread,
     time::Duration,
     u64,
 };
 
-use api_version::{dispatch_api_version, KvFormat};
+use api_version::{KvFormat, dispatch_api_version};
 use concurrency_manager::ConcurrencyManager;
 use encryption_export::data_key_manager_from_config;
-use engine_rocks::{from_rocks_compression_type, RocksEngine, RocksStatistics};
-use engine_rocks_helper::sst_recovery::{RecoveryRunner, DEFAULT_CHECK_INTERVAL};
+use engine_rocks::{RocksEngine, RocksStatistics, from_rocks_compression_type};
+use engine_rocks_helper::sst_recovery::{DEFAULT_CHECK_INTERVAL, RecoveryRunner};
 use engine_store_ffi::{
-    self,
+    self, TiFlashEngine,
     core::DebugStruct,
     ffi::{
+        RaftStoreProxy, RaftStoreProxyFFI,
         interfaces_ffi::{
             EngineStoreServerHelper, EngineStoreServerStatus, RaftProxyStatus,
             RaftStoreProxyFFIHelper,
         },
         read_index_helper::ReadIndexClient,
-        RaftStoreProxy, RaftStoreProxyFFI,
     },
-    TiFlashEngine,
 };
 use engine_tiflash::PSLogEngine;
 use engine_traits::{
-    Engines, KvEngine, MiscExt, RaftEngine, SingletonFactory, TabletContext, TabletRegistry,
-    CF_DEFAULT, CF_WRITE,
+    CF_DEFAULT, CF_WRITE, Engines, KvEngine, MiscExt, RaftEngine, SingletonFactory, TabletContext,
+    TabletRegistry,
 };
 use error_code::ErrorCodeExt;
-use file_system::{get_io_rate_limiter, BytesFetcher, MetricsManager as IOMetricsManager};
+use file_system::{BytesFetcher, MetricsManager as IOMetricsManager, get_io_rate_limiter};
 use futures::executor::block_on;
 use grpcio::{EnvBuilder, Environment};
 use health_controller::HealthController;
@@ -52,25 +52,26 @@ use pd_client::{PdClient, RpcClient};
 use raft::eraftpb::MessageType;
 use raft_log_engine::RaftLogEngine;
 use raftstore::{
-    coprocessor::{config::SplitCheckConfigManager, CoprocessorHost, RegionInfoAccessor},
+    coprocessor::{CoprocessorHost, RegionInfoAccessor, config::SplitCheckConfigManager},
     router::ServerRaftStoreRouter,
     store::{
+        AutoSplitController, CheckLeaderRunner, DiskCheckRunner, ForcePartitionRangeManager,
+        LocalReader, SnapManager, SnapManagerBuilder, SplitCheckRunner, SplitConfigManager,
+        StoreMetaDelegate,
         config::RaftstoreConfigManager,
         fsm,
         fsm::store::{
-            RaftBatchSystem, RaftRouter, StoreMeta, MULTI_FILES_SNAPSHOT_FEATURE, PENDING_MSG_CAP,
+            MULTI_FILES_SNAPSHOT_FEATURE, PENDING_MSG_CAP, RaftBatchSystem, RaftRouter, StoreMeta,
         },
         memory::MEMTRACE_ROOT as MEMTRACE_RAFTSTORE,
-        AutoSplitController, CheckLeaderRunner, DiskCheckRunner, LocalReader, SnapManager,
-        SnapManagerBuilder, SplitCheckRunner, SplitConfigManager, StoreMetaDelegate,
     },
 };
 use resource_control::{
-    ResourceGroupManager, ResourceManagerService, MIN_PRIORITY_UPDATE_INTERVAL,
+    MIN_PRIORITY_UPDATE_INTERVAL, ResourceGroupManager, ResourceManagerService,
 };
 use security::SecurityManager;
 use server::{
-    common::{check_system_config, EngineMetricsManager, TikvServerCore},
+    common::{EngineMetricsManager, TikvServerCore, check_system_config},
     memory::*,
 };
 use service::{service_event::ServiceEvent, service_manager::GrpcServiceManager};
@@ -79,8 +80,10 @@ use tikv::{
     coprocessor::{self, MEMTRACE_ROOT as MEMTRACE_COPROCESSOR},
     coprocessor_v2,
     import::{ImportSstService, SstImporter},
-    read_pool::{build_yatp_read_pool, ReadPool, ReadPoolConfigManager},
+    read_pool::{ReadPool, ReadPoolConfigManager, build_yatp_read_pool},
     server::{
+        CPU_CORES_QUOTA_GAUGE, GRPC_THREAD_PREFIX, KvEngineFactoryBuilder, MultiRaftServer, RaftKv,
+        Server,
         config::{Config as ServerConfig, ServerConfigManager},
         debug::{Debugger, DebuggerImpl},
         gc_worker::GcWorker,
@@ -89,34 +92,30 @@ use tikv::{
         service::{DebugService, DiagnosticsService, RaftGrpcMessageFilter},
         tablet_snap::NoSnapshotCache,
         ttl::TtlChecker,
-        KvEngineFactoryBuilder, MultiRaftServer, RaftKv, Server, CPU_CORES_QUOTA_GAUGE,
-        GRPC_THREAD_PREFIX,
     },
     storage::{
-        self,
+        self, Engine, Storage,
         config_manager::StorageConfigManger,
         kv::LocalTablets,
         txn::{
             flow_controller::{EngineFlowController, FlowController},
             txn_status_cache::TxnStatusCache,
         },
-        Engine, Storage,
     },
 };
 use tikv_util::{
-    check_environment_variables,
-    config::{ensure_dir_exist, ReadableDuration, VersionTrack},
+    Either, check_environment_variables,
+    config::{ReadableDuration, VersionTrack, ensure_dir_exist},
     error,
     quota_limiter::{QuotaLimitConfigManager, QuotaLimiter},
     sys::{
-        disk, memory_usage_reaches_high_water, register_memory_usage_high_water,
-        thread::ThreadBuildWrapper, SysQuota,
+        SysQuota, disk, memory_usage_reaches_high_water, register_memory_usage_high_water,
+        thread::ThreadBuildWrapper,
     },
     thread_group::GroupProperties,
     time::{Instant, Monitor},
     worker::{Builder as WorkerBuilder, LazyWorker, Scheduler},
     yatp_pool::CleanupMethod,
-    Either,
 };
 use tokio::runtime::Builder;
 
@@ -555,7 +554,7 @@ impl<CER: ConfiguredRaftEngine, F: KvFormat> TiKvServer<CER, F> {
         }
 
         // Create kv engine.
-        let builder = KvEngineFactoryBuilder::new(env, &self.core.config, block_cache, self.core.encryption_key_manager.clone())
+        let builder = KvEngineFactoryBuilder::new(env, &self.core.config, block_cache, self.core.encryption_key_manager.clone(), self.force_partition_range_mgr.clone())
             // TODO(tiflash) check if we need a old version of RocksEngine, or if we need to upgrade
             // .compaction_filter_router(self.router.clone())
             .region_info_accessor(self.region_info_accessor.clone().unwrap())
@@ -648,6 +647,7 @@ struct TiKvServer<ER: RaftEngine, F: KvFormat> {
     resource_manager: Option<Arc<ResourceGroupManager>>,
     tablet_registry: Option<TabletRegistry<RocksEngine>>,
     grpc_service_mgr: GrpcServiceManager,
+    force_partition_range_mgr: ForcePartitionRangeManager,
 }
 
 struct TiKvEngines<EK: KvEngine, ER: RaftEngine> {
@@ -809,6 +809,7 @@ impl<ER: RaftEngine, F: KvFormat> TiKvServer<ER, F> {
             resource_manager,
             tablet_registry: None,
             grpc_service_mgr: GrpcServiceManager::new(tx),
+            force_partition_range_mgr: ForcePartitionRangeManager::default(),
         }
     }
 

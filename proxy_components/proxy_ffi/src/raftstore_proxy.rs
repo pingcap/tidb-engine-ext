@@ -1,8 +1,8 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 #![allow(clippy::type_complexity)]
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
     Arc, RwLock,
+    atomic::{AtomicU8, Ordering},
 };
 
 use encryption::DataKeyManager;

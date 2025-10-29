@@ -6,7 +6,7 @@
 use std::{
     fs,
     path::Path,
-    sync::{atomic::AtomicIsize, Arc},
+    sync::{Arc, atomic::AtomicIsize},
 };
 
 pub(crate) use details::RocksEngine;
@@ -16,14 +16,14 @@ use engine_traits::{Checkpointable, Checkpointer, Error, KvEngine, Result};
 use rocksdb::DB;
 
 use crate::{
-    proxy_utils::{engine_ext::*, EngineStoreHub},
     ProxyEngineExt,
+    proxy_utils::{EngineStoreHub, engine_ext::*},
 };
 
 mod details {
     use std::sync::Arc;
 
-    use crate::{mixed_engine::elementary::ElementaryEngine, PageStorageExt, ProxyEngineExt};
+    use crate::{PageStorageExt, ProxyEngineExt, mixed_engine::elementary::ElementaryEngine};
     #[derive(Clone, Debug)]
     pub struct RocksEngine {
         // Must ensure rocks is the first field, for RocksEngine::from_ref.

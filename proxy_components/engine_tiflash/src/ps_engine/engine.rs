@@ -4,11 +4,11 @@ use engine_rocks::RocksEngineIterator;
 use engine_traits::{IterOptions, Iterable, ReadOptions, Result};
 
 use crate::{
-    mixed_engine::{
-        elementary::{ElementaryEngine, ElementaryWriteBatch},
-        MixedDbVector,
-    },
     PageStorageExt,
+    mixed_engine::{
+        MixedDbVector,
+        elementary::{ElementaryEngine, ElementaryWriteBatch},
+    },
 };
 
 #[derive(Clone, Debug)]

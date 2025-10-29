@@ -2,11 +2,11 @@ use kvproto::metapb::RegionEpoch;
 use tikv::{
     server::lock_manager::waiter_manager,
     storage::{
+        Error as StorageError,
         lock_manager::{
             DiagnosticContext, KeyLockWaitInfo, LockManager as LockManagerTrait, LockWaitToken,
             UpdateWaitForEvent, WaitTimeout,
         },
-        Error as StorageError,
     },
 };
 use txn_types::TimeStamp;

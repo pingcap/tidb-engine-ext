@@ -5,7 +5,7 @@ pub use collections::HashMap;
 pub use grpcio::{ChannelBuilder, Environment};
 pub use kvproto::{kvrpcpb::*, tikvpb::TikvClient};
 pub use mock_engine_store::mock_cluster::v1::{
-    server::{new_server_cluster, ServerCluster},
+    server::{ServerCluster, new_server_cluster},
     *,
 };
 pub use txn_types::TimeStamp;

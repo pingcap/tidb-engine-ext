@@ -4,39 +4,35 @@ version = "0.0.1"
 edition = "2021"
 publish = false
 
-[[test]]
-name = "proxy"
-path = "proxy/mod.rs"
-required-features = ["failpoints", "testexport"]
-
 [features]
 default = ["failpoints", "testexport", "test-engine-kv-rocksdb"]
 failpoints = ["fail/failpoints", "tikv/failpoints"]
 # cloud-aws = ["encryption_export/cloud-aws"]
 # cloud-gcp = ["encryption_export/cloud-gcp"]
 # cloud-azure = ["encryption_export/cloud-azure"]
-testexport = ["raftstore/testexport", "raftstore-v2/testexport", "tikv/testexport", "engine_tiflash/testexport", "engine_store_ffi/testexport"]
+testexport = [
+    "raftstore/testexport",
+    "raftstore-v2/testexport",
+    "tikv/testexport",
+    "engine_tiflash/testexport",
+    "engine_store_ffi/testexport",
+]
 profiling = ["profiler/profiling"]
 
 test-engine-kv-rocksdb = [
-  "raftstore/test-engine-kv-rocksdb",
-  "mock-engine-store/test-engine-kv-rocksdb"
+    "raftstore/test-engine-kv-rocksdb",
+    "mock-engine-store/test-engine-kv-rocksdb",
 ]
 test-engine-raft-raft-engine = [
-  "raftstore/test-engine-raft-raft-engine",
-  "mock-engine-store/test-engine-raft-raft-engine"
+    "raftstore/test-engine-raft-raft-engine",
+    "mock-engine-store/test-engine-raft-raft-engine",
 ]
 test-engines-rocksdb = [
-  "raftstore/test-engines-rocksdb",
-  "mock-engine-store/test-engines-rocksdb"
+    "raftstore/test-engines-rocksdb",
+    "mock-engine-store/test-engines-rocksdb",
 ]
-test-engines-panic = [
-  "raftstore/test-engines-panic",
-  "mock-engine-store/test-engines-panic"
-]
-test-engine-raft-rocksdb = [
-  "engine_test/test-engine-raft-rocksdb"
-]
+test-engines-panic = ["raftstore/test-engines-panic", "mock-engine-store/test-engines-panic"]
+test-engine-raft-rocksdb = ["engine_test/test-engine-raft-rocksdb"]
 
 jemalloc = ["tikv/jemalloc", "proxy_server/jemalloc", "proxy_ffi/jemalloc"]
 mimalloc = ["tikv/mimalloc"]
@@ -146,3 +142,8 @@ tokio = { version = "1.5", features = ["rt-multi-thread"] }
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dev-dependencies]
 criterion-perf-events = "0.1"
 perfcnt = "0.7"
+
+[[test]]
+name = "proxy"
+path = "proxy/mod.rs"
+required-features = ["failpoints", "testexport"]

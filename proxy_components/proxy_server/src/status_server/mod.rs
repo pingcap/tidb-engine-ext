@@ -26,14 +26,13 @@ use futures::{
     prelude::*,
 };
 use hyper::{
-    self, header,
+    self, Body, Method, Request, Response, Server, StatusCode, header,
     server::{
+        Builder as HyperBuilder,
         accept::Accept,
         conn::{AddrIncoming, AddrStream},
-        Builder as HyperBuilder,
     },
     service::{make_service_fn, service_fn},
-    Body, Method, Request, Response, Server, StatusCode,
 };
 use online_config::OnlineConfig;
 use openssl::{
@@ -45,7 +44,7 @@ use profile::{
     activate_heap_profile, deactivate_heap_profile, dump_one_heap_profile, list_heap_profiles,
     start_one_cpu_profile,
 };
-use raftstore::store::{transport::CasualRouter, CasualMessage};
+use raftstore::store::{CasualMessage, transport::CasualRouter};
 use regex::Regex;
 use security::{self, SecurityConfig};
 use serde_json::Value;
@@ -76,7 +75,7 @@ static MISSING_ACTIONS: &[u8] = b"Missing param actions";
 #[cfg(feature = "failpoints")]
 static FAIL_POINTS_REQUEST_PATH: &str = "/fail";
 
-use prometheus::{exponential_buckets, register_histogram_vec, HistogramVec};
+use prometheus::{HistogramVec, exponential_buckets, register_histogram_vec};
 
 lazy_static::lazy_static! {
     pub static ref STATUS_REQUEST_DURATION: HistogramVec = register_histogram_vec!(

@@ -26,7 +26,7 @@ pub use test_raftstore::{
 };
 pub use util::*;
 
-use super::{mixed_cluster::*, test_utils::*, ClusterExt, FFIHelperSet, MixedClusterConfig};
+use super::{ClusterExt, FFIHelperSet, MixedClusterConfig, mixed_cluster::*, test_utils::*};
 
 impl<T: Simulator<TiFlashEngine>> MixedCluster for Cluster<T> {
     fn get_all_store_ids(&self) -> Vec<u64> {

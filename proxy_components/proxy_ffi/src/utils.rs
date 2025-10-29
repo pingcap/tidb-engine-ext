@@ -6,7 +6,7 @@ use std::{
     time::{self},
 };
 
-use futures_util::{compat::Future01CompatExt, future::BoxFuture, FutureExt};
+use futures_util::{FutureExt, compat::Future01CompatExt, future::BoxFuture};
 use lazy_static::lazy_static;
 use tikv_util::{sys::thread::StdThreadBuildWrapper, thd_name, thread_group};
 use tokio_timer::timer::Handle;

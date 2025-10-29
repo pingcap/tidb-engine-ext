@@ -3,7 +3,7 @@
 use core::ops::Bound::{Excluded, Included, Unbounded};
 use std::{
     collections::BTreeMap,
-    sync::{atomic::AtomicU64, Arc, RwLock},
+    sync::{Arc, RwLock, atomic::AtomicU64},
 };
 
 use engine_store_ffi::ffi::{
@@ -15,7 +15,7 @@ use engine_store_ffi::ffi::{
 
 use crate::{
     create_cpp_str, create_cpp_str_parts,
-    mock_store::{into_engine_store_server_wrap, RawCppPtrTypeImpl},
+    mock_store::{RawCppPtrTypeImpl, into_engine_store_server_wrap},
 };
 
 pub enum MockPSSingleWrite {

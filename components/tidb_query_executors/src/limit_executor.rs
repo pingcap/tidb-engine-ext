@@ -1,7 +1,7 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
 use async_trait::async_trait;
-use tidb_query_common::{storage::IntervalRange, Result};
+use tidb_query_common::{Result, storage::IntervalRange};
 use tipb::FieldType;
 
 use crate::interface::*;
@@ -22,6 +22,11 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
             is_src_scan_executor,
         })
     }
+
+    #[cfg(test)]
+    pub fn into_child(self) -> Src {
+        self.src
+    }
 }
 
 #[async_trait]
@@ -31,6 +36,19 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
     #[inline]
     fn schema(&self) -> &[FieldType] {
         self.src.schema()
+    }
+
+    #[inline]
+    fn intermediate_schema(&self, index: usize) -> Result<&[FieldType]> {
+        self.src.intermediate_schema(index)
+    }
+
+    #[inline]
+    fn consume_and_fill_intermediate_results(
+        &mut self,
+        results: &mut [Vec<BatchExecuteResult>],
+    ) -> Result<()> {
+        self.src.consume_and_fill_intermediate_results(results)
     }
 
     #[inline]
@@ -78,9 +96,9 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
 mod tests {
     use futures::executor::block_on;
     use tidb_query_datatype::{
+        FieldTypeTp,
         codec::{batch::LazyBatchColumnVec, data_type::VectorValue},
         expr::EvalWarnings,
-        FieldTypeTp,
     };
 
     use super::*;

@@ -6,7 +6,7 @@ use std::{
 };
 
 use causal_ts::CausalTsProvider;
-use cdc::{recv_timeout, CdcObserver, Delegate, FeatureGate, Task, Validate};
+use cdc::{CdcObserver, Delegate, FeatureGate, Task, Validate, recv_timeout};
 use collections::HashMap;
 use concurrency_manager::ConcurrencyManager;
 use engine_rocks::RocksEngine;
@@ -16,7 +16,7 @@ use grpcio::{
     Environment, MetadataBuilder,
 };
 use kvproto::{
-    cdcpb::{create_change_data, ChangeDataClient, ChangeDataEvent, ChangeDataRequest},
+    cdcpb::{ChangeDataClient, ChangeDataEvent, ChangeDataRequest, create_change_data},
     kvrpcpb::{PrewriteRequestPessimisticAction::*, *},
     tikvpb::TikvClient,
 };
@@ -29,10 +29,10 @@ use tikv::{
     storage::kv::LocalTablets,
 };
 use tikv_util::{
+    HandyRwLock,
     config::ReadableDuration,
     memory::MemoryQuota,
-    worker::{LazyWorker, Runnable},
-    HandyRwLock,
+    worker::{Builder, LazyWorker, Runnable},
 };
 use txn_types::TimeStamp;
 static INIT: Once = Once::new();
@@ -185,11 +185,16 @@ impl TestSuiteBuilder {
             let memory_quota = Arc::new(MemoryQuota::new(memory_quota));
             let memory_quota_ = memory_quota.clone();
             let scheduler = worker.scheduler();
+            let pool = Arc::new(Builder::new("cdc-watchdog-test").thread_count(1).create());
             sim.pending_services
                 .entry(id)
                 .or_default()
                 .push(Box::new(move || {
-                    create_change_data(cdc::Service::new(scheduler.clone(), memory_quota_.clone()))
+                    create_change_data(cdc::Service::new(
+                        scheduler.clone(),
+                        memory_quota_.clone(),
+                        pool.clone(),
+                    ))
                 }));
             sim.txn_extra_schedulers.insert(
                 id,

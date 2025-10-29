@@ -1,14 +1,13 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    cmp,
-    cmp::Ordering as CmpOrdering,
+    cmp::{self, Ordering as CmpOrdering},
     fmt::{self, Display, Formatter},
     io, mem,
     sync::{
-        atomic::Ordering,
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender, SyncSender},
-        Arc, Mutex,
     },
     thread::{Builder, JoinHandle},
     time::{Duration, Instant},
@@ -19,11 +18,11 @@ use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
 use engine_traits::{KvEngine, RaftEngine};
 use fail::fail_point;
-use futures::{compat::Future01CompatExt, FutureExt};
+use futures::{FutureExt, compat::Future01CompatExt};
 use health_controller::{
+    HealthController,
     reporters::{RaftstoreReporter, RaftstoreReporterConfig},
     types::{InspectFactor, LatencyInspector, RaftstoreDuration},
-    HealthController,
 };
 use kvproto::{
     kvrpcpb::DiskFullOpt,
@@ -35,23 +34,22 @@ use kvproto::{
     raft_serverpb::RaftMessage,
     replication_modepb::{RegionReplicationStatus, StoreDrAutoSyncStatus},
 };
-use pd_client::{metrics::*, BucketStat, Error, PdClient, RegionStat, RegionWriteCfCopDetail};
+use pd_client::{BucketStat, Error, PdClient, RegionStat, RegionWriteCfCopDetail, metrics::*};
 use prometheus::local::LocalHistogram;
 use raft::eraftpb::ConfChangeType;
 use resource_metering::{Collector, CollectorGuard, CollectorRegHandle, RawRecords};
 use service::service_manager::GrpcServiceManager;
 use tikv_util::{
-    box_err, debug, error, info,
+    GLOBAL_SERVER_READINESS, box_err, debug, error, info,
     metrics::ThreadInfoStatistics,
     store::QueryStats,
-    sys::{disk, thread::StdThreadBuildWrapper, SysQuota},
+    sys::{SysQuota, disk, thread::StdThreadBuildWrapper},
     thd_name,
     time::{Instant as TiInstant, UnixSecs},
     timer::GLOBAL_TIMER_HANDLE,
     topn::TopN,
     warn,
     worker::{Runnable, ScheduleError, Scheduler},
-    GLOBAL_SERVER_READINESS,
 };
 use yatp::Remote;
 
@@ -60,18 +58,18 @@ use crate::{
     coprocessor::CoprocessorHost,
     router::RaftStoreRouter,
     store::{
+        Callback, CasualMessage, Config, PeerMsg, RaftCmdExtraOpts, RaftCommand, RaftRouter,
+        SnapManager, StoreMsg, StoreTick, TxnExt,
         cmd_resp::new_error,
         metrics::*,
         unsafe_recovery::{
             UnsafeRecoveryExecutePlanSyncer, UnsafeRecoveryForceLeaderSyncer, UnsafeRecoveryHandle,
         },
-        util::{is_epoch_stale, KeysInfoFormatter},
+        util::{KeysInfoFormatter, is_epoch_stale},
         worker::{
-            split_controller::{SplitInfo, TOP_N},
             AutoSplitController, ReadStats, SplitConfigChange, WriteStats,
+            split_controller::{SplitInfo, TOP_N},
         },
-        Callback, CasualMessage, Config, PeerMsg, RaftCmdExtraOpts, RaftCommand, RaftRouter,
-        SnapManager, StoreMsg, TxnExt,
     },
 };
 
@@ -110,13 +108,13 @@ where
 {
     fn report_read_stats(&self, read_stats: ReadStats) {
         if let Err(e) = self.schedule(Task::ReadStats { read_stats }) {
-            error!("Failed to send read flow statistics"; "err" => ?e);
+            warn!("Failed to send read flow statistics"; "err" => ?e);
         }
     }
 
     fn report_write_stats(&self, write_stats: WriteStats) {
         if let Err(e) = self.schedule(Task::WriteStats { write_stats }) {
-            error!("Failed to send write flow statistics"; "err" => ?e);
+            warn!("Failed to send write flow statistics"; "err" => ?e);
         }
     }
 }
@@ -210,6 +208,9 @@ where
     ControlGrpcServer(pdpb::ControlGrpcEvent),
     InspectLatency {
         factor: InspectFactor,
+    },
+    GracefulShutdownState {
+        state: bool,
     },
 }
 
@@ -482,6 +483,9 @@ where
             Task::InspectLatency { factor } => {
                 write!(f, "inspect raftstore latency: {:?}", factor)
             }
+            Task::GracefulShutdownState { state } => {
+                write!(f, "graceful shutdown state: {:?}", state)
+            }
         }
     }
 }
@@ -494,6 +498,52 @@ fn default_collect_tick_interval() -> Duration {
         Duration::from_millis(1)
     });
     DEFAULT_COLLECT_TICK_INTERVAL
+}
+
+/// Determines the minimal interval for latency inspection ticks based on raft
+/// and kvdb inspection intervals.
+///
+/// This function handles different scenarios for latency inspection:
+/// 1. Both intervals are zero: Inspection is disabled, returns a large interval
+///    (1 hour)
+/// 2. Only raft interval is zero: Uses kvdb interval (raft inspection disabled)
+/// 3. Only kvdb interval is zero: Uses raft interval (kvdb inspection disabled)
+/// 4. Both intervals non-zero: Uses the smaller of the two intervals
+///
+/// # Arguments
+///
+/// * `inspect_latency_interval` - Interval for raft latency inspection
+/// * `inspect_kvdb_latency_interval` - Interval for kvdb latency inspection
+///
+/// # Returns
+///
+/// The minimal interval that should be used for latency inspection ticks
+fn get_minimal_inspect_tick_interval(
+    inspect_latency_interval: Duration,
+    inspect_kvdb_latency_interval: Duration,
+) -> Duration {
+    match (
+        inspect_latency_interval.is_zero(),
+        inspect_kvdb_latency_interval.is_zero(),
+    ) {
+        (true, true) => {
+            // Both inspections are disabled - return a large interval to avoid misleading
+            // tick checks
+            Duration::from_secs(3600)
+        }
+        (true, false) => {
+            // raft inspection disabled - use kvdb interval
+            inspect_kvdb_latency_interval
+        }
+        (false, true) => {
+            // kvdb inspection disabled - use raft interval
+            inspect_latency_interval
+        }
+        (false, false) => {
+            // Both inspections enabled - use the smaller interval
+            std::cmp::min(inspect_latency_interval, inspect_kvdb_latency_interval)
+        }
+    }
 }
 
 #[inline]
@@ -561,7 +611,7 @@ where
             min_resolved_ts,
         };
         if let Err(e) = self.0.schedule(task) {
-            error!(
+            warn!(
                 "failed to send min resolved ts to pd worker";
                 "err" => ?e,
             );
@@ -571,7 +621,7 @@ where
     fn auto_split(&self, split_infos: Vec<SplitInfo>) {
         let task = Task::AutoSplit { split_infos };
         if let Err(e) = self.0.schedule(task) {
-            error!(
+            warn!(
                 "failed to send split infos to pd worker";
                 "err" => ?e,
             );
@@ -583,7 +633,7 @@ where
                 "tick" => timer_tick);
         let task = Task::InspectLatency { factor };
         if let Err(e) = self.0.schedule(task) {
-            error!(
+            warn!(
                 "failed to send inspect raftstore latency task to pd worker";
                 "err" => ?e,
             );
@@ -603,8 +653,9 @@ where
     collect_store_infos_interval: Duration,
     load_base_split_check_interval: Duration,
     collect_tick_interval: Duration,
-    inspect_latency_interval: Duration,
-    inspect_kvdb_latency_interval: Duration,
+    inspect_latency_interval: Duration,      // for raft mount path
+    inspect_kvdb_latency_interval: Duration, // for kvdb mount path
+    inspect_network_interval: Duration,
 }
 
 impl<T> StatsMonitor<T>
@@ -615,6 +666,7 @@ where
         interval: Duration,
         inspect_latency_interval: Duration,
         inspect_kvdb_latency_interval: Duration,
+        inspect_network_interval: Duration,
         reporter: T,
     ) -> Self {
         StatsMonitor {
@@ -628,13 +680,17 @@ where
                 DEFAULT_LOAD_BASE_SPLIT_CHECK_INTERVAL,
                 interval,
             ),
-            // Use `inspect_latency_interval` as the minimal limitation for collecting tick.
+            // Use the smallest inspect latency as the minimal limitation for collecting tick.
             collect_tick_interval: cmp::min(
-                inspect_latency_interval,
-                cmp::min(default_collect_tick_interval(), interval),
+                get_minimal_inspect_tick_interval(
+                    inspect_latency_interval,
+                    inspect_kvdb_latency_interval,
+                ),
+                interval.min(default_collect_tick_interval()),
             ),
             inspect_latency_interval,
             inspect_kvdb_latency_interval,
+            inspect_network_interval,
         }
     }
 
@@ -647,7 +703,10 @@ where
     ) -> Result<(), io::Error> {
         if self.collect_tick_interval
             < cmp::min(
-                self.inspect_latency_interval,
+                get_minimal_inspect_tick_interval(
+                    self.inspect_latency_interval,
+                    self.inspect_kvdb_latency_interval,
+                ),
                 default_collect_tick_interval(),
             )
         {
@@ -669,6 +728,9 @@ where
                 .div_duration_f64(tick_interval) as u64;
         let update_kvdisk_latency_stats_interval =
             self.inspect_kvdb_latency_interval
+                .div_duration_f64(tick_interval) as u64;
+        let update_network_latency_stats_interval =
+            self.inspect_network_interval
                 .div_duration_f64(tick_interval) as u64;
 
         let (timer_tx, timer_rx) = mpsc::channel();
@@ -735,6 +797,9 @@ where
                     }
                     if is_enable_tick(timer_cnt, update_kvdisk_latency_stats_interval) {
                         reporter.update_latency_stats(timer_cnt, InspectFactor::KvDisk);
+                    }
+                    if is_enable_tick(timer_cnt, update_network_latency_stats_interval) {
+                        reporter.update_latency_stats(timer_cnt, InspectFactor::Network);
                     }
                     timer_cnt += 1;
                 }
@@ -864,7 +929,7 @@ where
     store_id: u64,
     pd_client: Arc<T>,
     router: RaftRouter<EK, ER>,
-    region_peers: HashMap<u64, PeerStat>,
+    region_peers: Arc<RwLock<HashMap<u64, PeerStat>>>,
     region_buckets: HashMap<u64, ReportBucket>,
     store_stat: StoreStat,
     is_hb_receiver_scheduled: bool,
@@ -893,6 +958,9 @@ where
 
     // Service manager for grpc service.
     grpc_service_manager: GrpcServiceManager,
+
+    // Graceful shutdown state for evict leader during shutdown
+    graceful_shutdown_state: Arc<AtomicBool>,
 }
 
 impl<EK, ER, T> Runner<EK, ER, T>
@@ -916,6 +984,7 @@ where
         coprocessor_host: CoprocessorHost<EK>,
         causal_ts_provider: Option<Arc<CausalTsProviderImpl>>, // used for rawkv apiv2
         grpc_service_manager: GrpcServiceManager,
+        graceful_shutdown_state: Arc<std::sync::atomic::AtomicBool>,
     ) -> Runner<EK, ER, T> {
         let mut store_stat = StoreStat::default();
         store_stat.set_cpu_quota(SysQuota::cpu_cores_quota(), cfg.inspect_cpu_util_thd);
@@ -925,15 +994,17 @@ where
             interval,
             cfg.inspect_interval.0,
             cfg.inspect_kvdb_interval.0,
+            cfg.inspect_network_interval.0,
             WrappedScheduler(scheduler.clone()),
         );
         if let Err(e) = stats_monitor.start(auto_split_controller, collector_reg_handle) {
             error!("failed to start stats collector, error = {:?}", e);
         }
 
-        let health_reporter_config = RaftstoreReporterConfig {
+        let health_reporter_config: RaftstoreReporterConfig = RaftstoreReporterConfig {
             inspect_interval: cfg.inspect_interval.0,
             inspect_kvdb_interval: cfg.inspect_kvdb_interval.0,
+            inspect_network_interval: cfg.inspect_network_interval.0,
 
             unsensitive_cause: cfg.slow_trend_unsensitive_cause,
             unsensitive_result: cfg.slow_trend_unsensitive_result,
@@ -964,7 +1035,7 @@ where
             pd_client,
             router,
             is_hb_receiver_scheduled: false,
-            region_peers: HashMap::default(),
+            region_peers: Arc::new(RwLock::new(HashMap::default())),
             region_buckets: HashMap::default(),
             store_stat,
             start_ts: UnixSecs::now(),
@@ -980,6 +1051,7 @@ where
             coprocessor_host,
             causal_ts_provider,
             grpc_service_manager,
+            graceful_shutdown_state,
         }
     }
 
@@ -1183,29 +1255,32 @@ where
         dr_autosync_status: Option<StoreDrAutoSyncStatus>,
     ) {
         let mut report_peers = HashMap::default();
-        for (region_id, region_peer) in &mut self.region_peers {
-            let read_bytes = region_peer.read_bytes - region_peer.last_store_report_read_bytes;
-            let read_keys = region_peer.read_keys - region_peer.last_store_report_read_keys;
-            let query_stats = region_peer
-                .query_stats
-                .sub_query_stats(&region_peer.last_store_report_query_stats);
-            region_peer.last_store_report_read_bytes = region_peer.read_bytes;
-            region_peer.last_store_report_read_keys = region_peer.read_keys;
-            region_peer
-                .last_store_report_query_stats
-                .fill_query_stats(&region_peer.query_stats);
-            if read_bytes < hotspot_byte_report_threshold()
-                && read_keys < hotspot_key_report_threshold()
-                && query_stats.get_read_query_num() < hotspot_query_num_report_threshold()
-            {
-                continue;
+        {
+            let mut region_peers = self.region_peers.write().unwrap();
+            for (region_id, region_peer) in region_peers.iter_mut() {
+                let read_bytes = region_peer.read_bytes - region_peer.last_store_report_read_bytes;
+                let read_keys = region_peer.read_keys - region_peer.last_store_report_read_keys;
+                let query_stats = region_peer
+                    .query_stats
+                    .sub_query_stats(&region_peer.last_store_report_query_stats);
+                region_peer.last_store_report_read_bytes = region_peer.read_bytes;
+                region_peer.last_store_report_read_keys = region_peer.read_keys;
+                region_peer
+                    .last_store_report_query_stats
+                    .fill_query_stats(&region_peer.query_stats);
+                if read_bytes < hotspot_byte_report_threshold()
+                    && read_keys < hotspot_key_report_threshold()
+                    && query_stats.get_read_query_num() < hotspot_query_num_report_threshold()
+                {
+                    continue;
+                }
+                let mut read_stat = pdpb::PeerStat::default();
+                read_stat.set_region_id(*region_id);
+                read_stat.set_read_keys(read_keys);
+                read_stat.set_read_bytes(read_bytes);
+                read_stat.set_query_stats(query_stats.0);
+                report_peers.insert(*region_id, read_stat);
             }
-            let mut read_stat = pdpb::PeerStat::default();
-            read_stat.set_region_id(*region_id);
-            read_stat.set_read_keys(read_keys);
-            read_stat.set_read_bytes(read_bytes);
-            read_stat.set_query_stats(query_stats.0);
-            report_peers.insert(*region_id, read_stat);
         }
 
         stats = collect_report_read_peer_stats(HOTSPOT_REPORT_CAPACITY, report_peers, stats);
@@ -1263,8 +1338,16 @@ where
         self.store_stat.region_bytes_read.flush();
         self.store_stat.region_keys_read.flush();
 
-        let slow_score = self.health_reporter.get_slow_score();
-        stats.set_slow_score(slow_score as u64);
+        stats.set_slow_score(self.health_reporter.get_disk_slow_score() as u64);
+        // Filter out network slow scores equal to 1 to reduce message volume
+        let network_scores = self
+            .health_reporter
+            .get_network_slow_score()
+            .into_iter()
+            .filter(|(_, score)| *score != 1)
+            .collect();
+        stats.set_network_slow_scores(network_scores);
+
         let (rps, slow_trend_pb) = self
             .health_reporter
             .update_slow_trend(all_query_num, Instant::now());
@@ -1273,8 +1356,14 @@ where
 
         stats.set_is_grpc_paused(self.grpc_service_manager.is_paused());
 
+        stats.set_is_stopping(
+            self.graceful_shutdown_state
+                .load(std::sync::atomic::Ordering::SeqCst),
+        );
+
         let scheduler = self.scheduler.clone();
         let router = self.router.clone();
+        let region_peers = self.region_peers.clone();
         let mut snap_mgr = self.snap_mgr.clone();
         let resp = self
             .pd_client
@@ -1341,13 +1430,39 @@ where
                             }
                         }
                     }
-                    // Forcely awaken all hibernated regions if there existed slow stores in this
-                    // cluster.
+                    // Force awaken all hibernated regions if there are slow stores in this
+                    // cluster. To mitigate the impact of stalls when awakening too many regions,
+                    // we break up all regions into small batches.
                     if let Some(awaken_regions) = resp.awaken_regions.take() {
                         info!("forcely awaken hibernated regions in this store");
-                        let _ = router.send_store_msg(StoreMsg::AwakenRegions {
-                            abnormal_stores: awaken_regions.get_abnormal_stores().to_vec(),
-                        });
+                        let abnormal_stores = awaken_regions.get_abnormal_stores().to_vec();
+                        // The chunk_size of 1024 is an empirical batch size that balances
+                        // between generating too many `StoreMsg::AwakenRegions` messages and
+                        // keeping each batch small enough to avoid stalling Raftstore for
+                        // extended periods.
+                        let chunk_size = 1024;
+                        let mut region_ids = Vec::with_capacity(chunk_size);
+
+                        for (id, _) in region_peers.read().unwrap().iter() {
+                            region_ids.push(*id);
+
+                            // Send batch when it reaches the chunk size
+                            if region_ids.len() >= chunk_size {
+                                let _ = router.send_store_msg(StoreMsg::AwakenRegions {
+                                    abnormal_stores: abnormal_stores.clone(),
+                                    region_ids: std::mem::take(&mut region_ids),
+                                });
+                                region_ids.reserve(chunk_size);
+                            }
+                        }
+
+                        // Send remaining regions if any
+                        if !region_ids.is_empty() {
+                            let _ = router.send_store_msg(StoreMsg::AwakenRegions {
+                                abnormal_stores: abnormal_stores.clone(),
+                                region_ids,
+                            });
+                        }
                     }
                     // Control grpc server.
                     if let Some(op) = resp.control_grpc.take() {
@@ -1389,7 +1504,7 @@ where
                     }
                 }
                 Err(e) => {
-                    error!("store heartbeat failed"; "err" => ?e);
+                    warn!("store heartbeat failed"; "err" => ?e);
                 }
             }
         };
@@ -1644,15 +1759,18 @@ where
 
     fn handle_read_stats(&mut self, mut read_stats: ReadStats) {
         for (region_id, region_info) in read_stats.region_infos.iter_mut() {
-            let peer_stat = self.region_peers.entry(*region_id).or_default();
-            peer_stat.read_bytes += region_info.flow.read_bytes as u64;
-            peer_stat.read_keys += region_info.flow.read_keys as u64;
-            self.store_stat.engine_total_bytes_read += region_info.flow.read_bytes as u64;
-            self.store_stat.engine_total_keys_read += region_info.flow.read_keys as u64;
-            peer_stat
-                .query_stats
-                .add_query_stats(&region_info.query_stats.0);
-            peer_stat.cop_detail.add(&region_info.cop_detail);
+            {
+                let mut region_peers = self.region_peers.write().unwrap();
+                let peer_stat = region_peers.entry(*region_id).or_default();
+                peer_stat.read_bytes += region_info.flow.read_bytes as u64;
+                peer_stat.read_keys += region_info.flow.read_keys as u64;
+                self.store_stat.engine_total_bytes_read += region_info.flow.read_bytes as u64;
+                self.store_stat.engine_total_keys_read += region_info.flow.read_keys as u64;
+                peer_stat
+                    .query_stats
+                    .add_query_stats(&region_info.query_stats.0);
+                peer_stat.cop_detail.add(&region_info.cop_detail);
+            }
             self.store_stat
                 .engine_total_query_num
                 .add_query_stats(&region_info.query_stats.0);
@@ -1667,8 +1785,11 @@ where
 
     fn handle_write_stats(&mut self, mut write_stats: WriteStats) {
         for (region_id, region_info) in write_stats.region_infos.iter_mut() {
-            let peer_stat = self.region_peers.entry(*region_id).or_default();
-            peer_stat.query_stats.add_query_stats(&region_info.0);
+            {
+                let mut region_peers = self.region_peers.write().unwrap();
+                let peer_stat = region_peers.entry(*region_id).or_default();
+                peer_stat.query_stats.add_query_stats(&region_info.0);
+            }
             self.store_stat
                 .engine_total_query_num
                 .add_query_stats(&region_info.0);
@@ -1676,9 +1797,18 @@ where
     }
 
     fn handle_destroy_peer(&mut self, region_id: u64) {
-        match self.region_peers.remove(&region_id) {
+        match self.region_peers.write().unwrap().remove(&region_id) {
             None => {}
             Some(_) => info!("remove peer statistic record in pd"; "region_id" => region_id),
+        }
+    }
+
+    fn handle_graceful_shutdown(&mut self, state: bool) {
+        self.graceful_shutdown_state.store(state, Ordering::SeqCst);
+        info!("handle graceful shutdown"; "state" => state);
+        let msg = StoreMsg::Tick(StoreTick::PdStoreHeartbeat);
+        if let Err(e) = self.router.send_control(msg) {
+            warn!("handle graceful shutdown failed"; "err" => ?e);
         }
     }
 
@@ -1795,13 +1925,13 @@ where
                     if leader.get_store_id() != 0 {
                         let msg = Box::new(CasualMessage::QueryRegionLeaderResp { region, leader });
                         if let Err(e) = router.send(region_id, PeerMsg::CasualMessage(msg)) {
-                            error!("send region info message failed"; "region_id" => region_id, "err" => ?e);
+                            warn!("send region info message failed"; "region_id" => region_id, "err" => ?e);
                         }
                     }
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    error!("get region failed"; "err" => ?e);
+                    warn!("get region failed"; "err" => ?e);
                 }
             }
         };
@@ -1883,7 +2013,7 @@ where
     fn handle_fake_store_heartbeat(&mut self) {
         let mut stats = pdpb::StoreStats::default();
         stats.set_store_id(self.store_id);
-        stats.set_region_count(self.region_peers.len() as u32);
+        stats.set_region_count(self.region_peers.read().unwrap().len() as u32);
 
         let snap_stats = self.snap_mgr.stats();
         stats.set_sending_snap_count(snap_stats.sending_count as u32);
@@ -1955,6 +2085,7 @@ where
         }
         let id = slow_score_tick_result.tick_id;
         let scheduler = self.scheduler.clone();
+
         let inspector = {
             match factor {
                 InspectFactor::RaftDisk => {
@@ -2015,6 +2146,16 @@ where
                         }
                     }),
                 ),
+                InspectFactor::Network => {
+                    let network_durations = self.health_reporter.record_network_duration(id);
+
+                    for (store_id, network_duration) in &network_durations {
+                        STORE_INSPECT_NETWORK_DURATION_HISTOGRAM
+                            .with_label_values(&[&store_id.to_string()])
+                            .observe(tikv_util::time::duration_to_sec(*network_duration));
+                    }
+                    return;
+                }
             }
         };
         let msg = StoreMsg::LatencyInspect {
@@ -2023,7 +2164,7 @@ where
             inspector,
         };
         if let Err(e) = self.router.send_control(msg) {
-            warn!("pd worker send latency inspecter failed"; "err" => ?e);
+            warn!("pd worker send latency inspector failed"; "err" => ?e);
         }
     }
 }
@@ -2174,7 +2315,8 @@ where
                     cpu_usage,
                 ) = {
                     let region_id = hb_task.region.get_id();
-                    let peer_stat = self.region_peers.entry(region_id).or_default();
+                    let mut region_peers = self.region_peers.write().unwrap();
+                    let peer_stat = region_peers.entry(region_id).or_default();
                     peer_stat.approximate_size = approximate_size;
                     peer_stat.approximate_keys = approximate_keys;
 
@@ -2280,7 +2422,7 @@ where
                 factor,
                 duration,
             } => {
-                self.health_reporter.record_raftstore_duration(
+                self.health_reporter.record_duration(
                     id,
                     factor,
                     duration,
@@ -2300,6 +2442,9 @@ where
             }
             Task::InspectLatency { factor } => {
                 self.handle_inspect_latency(factor);
+            }
+            Task::GracefulShutdownState { state } => {
+                self.handle_graceful_shutdown(state);
             }
         };
     }
@@ -2432,7 +2577,7 @@ fn send_admin_request<EK, ER>(
 
     let cmd = RaftCommand::new_ext(req, callback, extra_opts);
     if let Err(e) = router.send_raft_command(cmd) {
-        error!(
+        warn!(
             "send request failed";
             "region_id" => region_id, "cmd_type" => ?cmd_type, "err" => ?e,
         );
@@ -2533,7 +2678,7 @@ mod tests {
     use std::thread::sleep;
 
     use kvproto::{kvrpcpb, pdpb::QueryKind};
-    use pd_client::{new_bucket_stats, BucketMeta};
+    use pd_client::{BucketMeta, new_bucket_stats};
     use tikv_util::worker::LazyWorker;
 
     use super::*;
@@ -2562,6 +2707,7 @@ mod tests {
                 let mut stats_monitor = StatsMonitor::new(
                     Duration::from_secs(interval),
                     Duration::from_secs(interval),
+                    Duration::default(),
                     Duration::default(),
                     WrappedScheduler(scheduler),
                 );
@@ -2696,6 +2842,10 @@ mod tests {
                             cpu_time: 10,
                             read_keys: 0,
                             write_keys: 0,
+                            network_in_bytes: 0,
+                            network_out_bytes: 0,
+                            logical_read_bytes: 0,
+                            logical_write_bytes: 0,
                         },
                     );
                     records
@@ -2807,6 +2957,7 @@ mod tests {
             Duration::from_secs(interval),
             Duration::from_secs(interval),
             Duration::default(),
+            Duration::default(),
             WrappedScheduler(pd_worker.scheduler()),
         );
         stats_monitor
@@ -2839,12 +2990,16 @@ mod tests {
                             region_id: 1,
                             peer_id: 0,
                             key_ranges: vec![],
-                            extra_attachment: b"a".to_vec(),
+                            extra_attachment: Arc::new(b"a".to_vec()),
                         }),
                         RawRecord {
                             cpu_time: 111,
                             read_keys: 1,
                             write_keys: 0,
+                            network_in_bytes: 0,
+                            network_out_bytes: 0,
+                            logical_read_bytes: 0,
+                            logical_write_bytes: 0,
                         },
                     );
                     records

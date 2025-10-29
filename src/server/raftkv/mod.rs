@@ -13,8 +13,8 @@ use std::{
     pin::Pin,
     result,
     sync::{
-        atomic::{AtomicU8, Ordering},
         Arc, RwLock,
+        atomic::{AtomicU8, Ordering},
     },
     task::Poll,
     time::Duration,
@@ -22,8 +22,8 @@ use std::{
 
 use collections::{HashMap, HashSet};
 use concurrency_manager::ConcurrencyManager;
-use engine_traits::{CfName, KvEngine, MvccProperties, Snapshot};
-use futures::{future::BoxFuture, task::AtomicWaker, Future, Stream, StreamExt, TryFutureExt};
+use engine_traits::{CF_LOCK, CfName, KvEngine, MvccProperties, Snapshot};
+use futures::{Future, Stream, StreamExt, TryFutureExt, future::BoxFuture, task::AtomicWaker};
 use hybrid_engine::HybridEngineSnapshot;
 use in_memory_engine::RegionCacheMemoryEngine;
 use kvproto::{
@@ -35,29 +35,31 @@ use kvproto::{
     },
 };
 use raft::{
-    eraftpb::{self, MessageType},
     StateRole,
+    eraftpb::{self, MessageType},
 };
 pub use raft_extension::RaftRouterWrap;
 use raftstore::{
+    RegionInfoAccessor, SeekRegionCallback,
     coprocessor::{
-        dispatcher::BoxReadIndexObserver, Coprocessor, CoprocessorHost, ReadIndexObserver,
+        Coprocessor, CoprocessorHost, ReadIndexObserver, RegionInfoProvider,
+        dispatcher::BoxReadIndexObserver,
     },
     errors::Error as RaftServerError,
     router::{LocalReadRouter, RaftStoreRouter, ReadContext},
     store::{
-        self, util::encode_start_ts_into_flag_data, Callback as StoreCallback, RaftCmdExtraOpts,
-        ReadIndexContext, ReadResponse, RegionSnapshot, StoreMsg, WriteResponse,
+        self, Callback as StoreCallback, RaftCmdExtraOpts, ReadIndexContext, ReadResponse,
+        RegionSnapshot, StoreMsg, WriteResponse, util::encode_start_ts_into_flag_data,
     },
 };
 use thiserror::Error;
-use tikv_kv::{write_modifies, OnAppliedCb, WriteEvent};
+use tikv_kv::{ExtraRegionOverride, OnAppliedCb, WriteEvent, write_modifies};
 use tikv_util::{
     callback::must_call,
     future::{paired_future_callback, paired_must_called_future_callback},
     time::Instant,
 };
-use tracker::{get_tls_tracker_token, GLOBAL_TRACKERS};
+use tracker::{GLOBAL_TRACKERS, get_tls_tracker_token};
 use txn_types::{Key, TimeStamp, TxnExtra, TxnExtraScheduler, WriteBatchFlags};
 
 use super::metrics::*;
@@ -165,13 +167,33 @@ where
 }
 
 #[inline]
-pub fn new_request_header(ctx: &Context) -> RaftRequestHeader {
+pub fn new_request_header(
+    ctx: &Context,
+    extra_snap_override: Option<&ExtraRegionOverride>,
+) -> RaftRequestHeader {
     let mut header = RaftRequestHeader::default();
-    header.set_region_id(ctx.get_region_id());
-    header.set_peer(ctx.get_peer().clone());
-    header.set_region_epoch(ctx.get_region_epoch().clone());
-    if ctx.get_term() != 0 {
-        header.set_term(ctx.get_term());
+    match extra_snap_override {
+        Some(&ExtraRegionOverride {
+            region_id,
+            ref region_epoch,
+            ref peer,
+            check_term,
+        }) => {
+            header.set_region_id(region_id);
+            header.set_peer(peer.clone());
+            header.set_region_epoch(region_epoch.clone());
+            if let Some(term) = check_term {
+                header.set_term(term);
+            }
+        }
+        _ => {
+            header.set_region_id(ctx.get_region_id());
+            header.set_peer(ctx.get_peer().clone());
+            header.set_region_epoch(ctx.get_region_epoch().clone());
+            if ctx.get_term() != 0 {
+                header.set_term(ctx.get_term());
+            }
+        }
     }
     header.set_sync_log(ctx.get_sync_log());
     header.set_replica_read(ctx.get_replica_read());
@@ -185,7 +207,7 @@ pub fn new_request_header(ctx: &Context) -> RaftRequestHeader {
 
 #[inline]
 pub fn new_flashback_req(ctx: &Context, ty: AdminCmdType) -> RaftCmdRequest {
-    let header = new_request_header(ctx);
+    let header = new_request_header(ctx, None);
     let mut req = RaftCmdRequest::default();
     req.set_header(header);
     req.mut_header()
@@ -356,6 +378,7 @@ where
     router: RaftRouterWrap<S, E>,
     engine: E,
     txn_extra_scheduler: Option<Arc<dyn TxnExtraScheduler>>,
+    region_info_accessor: Option<RegionInfoAccessor>,
     region_leaders: Arc<RwLock<HashSet<u64>>>,
 }
 
@@ -365,11 +388,17 @@ where
     S: RaftStoreRouter<E> + LocalReadRouter<E> + 'static,
 {
     /// Create a RaftKv using specified configuration.
-    pub fn new(router: S, engine: E, region_leaders: Arc<RwLock<HashSet<u64>>>) -> RaftKv<E, S> {
+    pub fn new(
+        router: S,
+        engine: E,
+        region_info_accessor: Option<RegionInfoAccessor>,
+        region_leaders: Arc<RwLock<HashSet<u64>>>,
+    ) -> RaftKv<E, S> {
         RaftKv {
             router: RaftRouterWrap::new(router),
             engine,
             txn_extra_scheduler: None,
+            region_info_accessor,
             region_leaders,
         }
     }
@@ -506,8 +535,34 @@ where
         }
 
         let reqs: Vec<Request> = batch.modifies.into_iter().map(Into::into).collect();
+
+        if txn_types::ENABLE_DUP_KEY_DEBUG.load(Ordering::Relaxed) {
+            // Ref: https://github.com/tikv/tikv/issues/18498.
+            // Check for duplicate key entries before proposing commands.
+            // TODO: remove this check when the cause of issue 18498 is located.
+            let mut keys_set = std::collections::HashSet::new();
+            for req in &reqs {
+                if req.has_put() && req.get_put().get_cf() == CF_LOCK {
+                    let key = req.get_put().get_key();
+                    if !keys_set.insert(key.to_vec()) {
+                        let wrapped_key = log_wrappers::Value::key(key);
+                        error!(
+                            "[for debug] found duplicate key in Lock CF PUT request, key: {:?}, \
+                        extra: {:?}, ctx: {:?}, reqs: {:?}, avoid_batch:{:?}",
+                            wrapped_key, batch.extra, ctx, reqs, batch.avoid_batch
+                        );
+                        // TODO: remove this in production or new release.
+                        panic!(
+                            "[for debug] found duplicate key in Lock CF PUT request, key: {:?}, \
+                        extra: {:?}, ctx: {:?}, reqs: {:?}, avoid_batch:{:?}",
+                            wrapped_key, batch.extra, ctx, reqs, batch.avoid_batch
+                        );
+                    }
+                }
+            }
+        }
         let txn_extra = batch.extra;
-        let mut header = new_request_header(ctx);
+        let mut header = new_request_header(ctx, None);
         if batch.avoid_batch {
             header.set_uuid(uuid::Uuid::new_v4().as_bytes().to_vec());
         }
@@ -668,6 +723,15 @@ where
                 warn!("unsafe destroy range: failed sending ClearRegionSizeInRange"; "err" => ?e);
             });
     }
+
+    fn seek_region(&self, from: &[u8], callback: SeekRegionCallback) -> kv::Result<()> {
+        match self.region_info_accessor {
+            Some(ref accessor) => accessor
+                .seek_region(from, callback)
+                .map_err(|e| box_err!(e)),
+            None => Err(box_err!("region_info_accessor is not available")),
+        }
+    }
 }
 
 fn async_snapshot<E, S>(
@@ -687,7 +751,7 @@ where
 
     let mut req = Request::default();
     req.set_cmd_type(CmdType::Snap);
-    if !ctx.key_ranges.is_empty() && ctx.start_ts.map_or(false, |ts| !ts.is_zero()) {
+    if !ctx.key_ranges.is_empty() && ctx.start_ts.is_some_and(|ts| !ts.is_zero()) {
         req.mut_read_index()
             .set_start_ts(ctx.start_ts.as_ref().unwrap().into_inner());
         req.mut_read_index()
@@ -697,9 +761,9 @@ where
     let begin_instant = Instant::now();
     let (cb, f) = paired_must_called_future_callback(drop_snapshot_callback);
 
-    let mut header = new_request_header(ctx.pb_ctx);
+    let mut header = new_request_header(ctx.pb_ctx, ctx.extra_region_override.as_ref());
     let mut flags = 0;
-    let need_encoded_start_ts = ctx.start_ts.map_or(true, |ts| !ts.is_zero());
+    let need_encoded_start_ts = ctx.start_ts.is_none_or(|ts| !ts.is_zero());
     if ctx.pb_ctx.get_stale_read() && need_encoded_start_ts {
         flags |= WriteBatchFlags::STALE_READ.bits();
     }

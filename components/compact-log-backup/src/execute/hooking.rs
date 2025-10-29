@@ -1,17 +1,17 @@
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::cell::Cell;
+use std::{cell::Cell, sync::Arc};
 
 pub use engine_traits::SstCompressionType;
 use external_storage::ExternalStorage;
 use tokio::runtime::Handle;
 
 use crate::{
+    Error,
     compaction::{Subcompaction, SubcompactionResult},
     errors::Result,
     execute::Execution,
     statistic::{CollectSubcompactionStatistic, LoadMetaStatistic},
-    Error,
 };
 
 pub struct NoHooks;
@@ -44,7 +44,7 @@ pub struct AfterFinishCtx<'a> {
     /// The target external storage of this compaction.
     ///
     /// For now, it is always the same as the source storage.
-    pub storage: &'a dyn ExternalStorage,
+    pub storage: &'a Arc<dyn ExternalStorage>,
 }
 
 #[derive(Clone, Copy)]
@@ -78,7 +78,7 @@ pub struct SubcompactionStartCtx<'a> {
     pub(super) skip: &'a Cell<bool>,
 }
 
-impl<'a> SubcompactionStartCtx<'a> {
+impl SubcompactionStartCtx<'_> {
     pub fn skip(&self) {
         self.skip.set(true);
     }

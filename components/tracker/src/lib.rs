@@ -10,8 +10,8 @@ use std::time::Instant;
 use kvproto::kvrpcpb as pb;
 
 pub use self::{
-    future::{track, FutureTrack},
-    slab::{TrackerToken, TrackerTokenArray, GLOBAL_TRACKERS, INVALID_TRACKER_TOKEN},
+    future::{FutureTrack, track},
+    slab::{GLOBAL_TRACKERS, INVALID_TRACKER_TOKEN, TrackerToken, TrackerTokenArray},
     tls::*,
 };
 
@@ -199,4 +199,7 @@ pub struct RequestMetrics {
     pub apply_thread_wait_nanos: u64,
     pub apply_write_wal_nanos: u64,
     pub apply_write_memtable_nanos: u64,
+
+    // recorded outside the read_pool thread, accessed inside the read_pool thread for topsql usage
+    pub grpc_req_size: u64,
 }

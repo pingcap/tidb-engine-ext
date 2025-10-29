@@ -156,7 +156,78 @@ To use this library, please follow the steps below:
 
 ## Contact
 
+<<<<<<< HEAD
 [Rongzhen Luo](http://github.com/CalvinNeo) ([luorongzhen@pingcap.com](mailto:luorongzhen@pingcap.com))
+=======
+4. Install TiKV Client(Python) and verify the deployment, required Python 3.5+.
+
+```bash
+$ pip3 install -i https://test.pypi.org/simple/ tikv-client
+```
+
+```python
+from tikv_client import RawClient
+
+client = RawClient.connect(["127.0.0.1:2379"])
+
+client.put(b'foo', b'bar')
+print(client.get(b'foo')) # b'bar'
+
+client.put(b'foo', b'baz')
+print(client.get(b'foo')) # b'baz'
+```
+
+### Deploy a cluster with TiUP
+
+You can see [this manual](./doc/deploy.md) of production-like cluster deployment presented by @c4pt0r.
+
+### Build from source
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## Client drivers
+
+- [Go](https://github.com/tikv/client-go) (The most stable and widely used)
+- [Java](https://github.com/tikv/client-java)
+- [Rust](https://github.com/tikv/client-rust)
+- [C](https://github.com/tikv/client-c)
+
+If you want to try the Go client, see [Go Client](https://tikv.org/docs/4.0/reference/clients/go/).
+
+## Security
+
+### Security audit
+
+A third-party security auditing was performed by Cure53. See the full report [here](./security/Security-Audit.pdf).
+
+### Reporting Security Vulnerabilities
+
+To report a security vulnerability, please send an email to [TiKV-security](mailto:tikv-security@lists.cncf.io) group.
+
+See [Security](SECURITY.md) for the process and policy followed by the TiKV project.
+
+## Communication
+
+Communication within the TiKV community abides by [TiKV Code of Conduct](./CODE_OF_CONDUCT.md). Here is an excerpt:
+
+> In the interest of fostering an open and welcoming environment, we as
+contributors and maintainers pledge to making participation in our project and
+our community a harassment-free experience for everyone, regardless of age, body
+size, disability, ethnicity, sex characteristics, gender identity and expression,
+level of experience, education, socio-economic status, nationality, personal
+appearance, race, religion, or sexual identity and orientation.
+
+### Social Media
+
+- [Twitter](https://twitter.com/tikvproject)
+- [Blog](https://tikv.org/blog/)
+- [Reddit](https://www.reddit.com/r/TiKV)
+- Post questions or help answer them on [Stack Overflow](https://stackoverflow.com/questions/tagged/tikv)
+
+### Slack
+
+Join the TiKV community on [Slack](https://slack.tidb.io/invite?team=tikv-wg&channel=general) - Sign up and join channels on TiKV topics that interest you.
+>>>>>>> tikv/master
 
 ## License
 

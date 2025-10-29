@@ -18,6 +18,7 @@ impl ImportExt for RocksEngine {
         cf_name: &str,
         files: &[&str],
         range: Option<Range<'_>>,
+        force_allow_write: bool,
     ) -> Result<()> {
         // do nothing
         return Ok(());

@@ -454,7 +454,8 @@ pub fn address_proxy_config(config: &mut TikvConfig, proxy_config: &ProxyConfig)
 }
 
 pub fn validate_and_persist_config(config: &mut TikvConfig, persist: bool) {
-    config.compatible_adjust();
+    let last_cfg = get_last_config(&config.storage.data_dir);
+    config.compatible_adjust(last_cfg.as_ref());
     if let Err(e) = config.validate() {
         fatal!("invalid configuration: {}", e);
     }
@@ -480,7 +481,8 @@ pub fn check_critical_config(config: &TikvConfig) -> Result<(), String> {
     // changes, user must guarantee relevant works have been done.
     if let Some(mut cfg) = get_last_config(&config.storage.data_dir) {
         info!("check_critical_config finished compatible_adjust");
-        cfg.compatible_adjust();
+        let last_cfg = get_last_config(&config.storage.data_dir);
+        cfg.compatible_adjust(last_cfg.as_ref());
         if let Err(e) = cfg.validate() {
             warn!("last_tikv.toml is invalid but ignored: {:?}", e);
         }

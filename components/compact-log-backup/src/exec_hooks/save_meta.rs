@@ -1,3 +1,5 @@
+use std::{sync::Arc, time::Instant};
+
 // Copyright 2024 TiKV Project Authors. Licensed under Apache-2.0.
 use chrono::Local;
 pub use engine_traits::SstCompressionType;
@@ -5,13 +7,14 @@ use external_storage::UnpinReader;
 use futures::{future::TryFutureExt, io::Cursor};
 use kvproto::brpb;
 use tikv_util::{
-    stream::{retry, JustRetry},
+    info,
+    stream::{JustRetry, retry},
     warn,
 };
 
 use super::CollectStatistic;
 use crate::{
-    compaction::{meta::CompactionRunInfoBuilder, META_OUT_REL, SST_OUT_REL},
+    compaction::{META_OUT_REL, SST_OUT_REL, meta::CompactionRunInfoBuilder},
     errors::Result,
     execute::hooking::{
         AfterFinishCtx, BeforeStartCtx, CId, ExecHooks, SubcompactionFinishCtx,
@@ -158,6 +161,11 @@ impl ExecHooks for SaveMeta {
         }
         let comments = self.comments();
         self.collector.mut_meta().set_comments(comments);
-        self.collector.write_migration(cx.storage).await
+        let begin = Instant::now();
+        self.collector
+            .write_migration(Arc::clone(cx.storage))
+            .await?;
+        info!("Migration written."; "duration" => ?begin.elapsed());
+        Ok(())
     }
 }

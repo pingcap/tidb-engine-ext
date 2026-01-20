@@ -1,5 +1,5 @@
 // Copyright 2016 TiKV Project Authors. Licensed under Apache-2.0.
-use std::{cell::RefCell, pin::Pin};
+use std::pin::Pin;
 
 use kvproto::{kvrpcpb, metapb, raft_cmdpb};
 
@@ -34,13 +34,6 @@ pub fn gen_engine_store_server_helper(
     unsafe { &(*(engine_store_server_helper as *const EngineStoreServerHelper)) }
 }
 
-thread_local! {
-    pub static JEMALLOC_REGISTERED: RefCell<bool> = RefCell::new(false);
-    pub static JEMALLOC_TNAME: RefCell<(String, u64)> = RefCell::new(Default::default());
-    pub static JEMALLOC_ALLOCP: RefCell<*mut u64> = RefCell::new(std::ptr::null_mut());
-    pub static JEMALLOC_DEALLOCP: RefCell<*mut u64> = RefCell::new(std::ptr::null_mut());
-}
-
 /// # Safety
 /// The lifetime of `engine_store_server_helper` is definitely longer than
 /// `ENGINE_STORE_SERVER_HELPER_PTR`.
@@ -57,83 +50,16 @@ pub fn set_server_info_resp(res: &kvproto::diagnosticspb::ServerInfoResponse, pt
 }
 
 impl EngineStoreServerHelper {
+    // NOTE: jemalloc memory tracking is disabled to avoid linking issues in sanitizer builds.
+    // When building with ASAN/TSAN/UBSAN, jemalloc is disabled but libtiflash_proxy.so
+    // still references mallctl symbols. Making these functions no-op avoids the issue.
+    // See: https://github.com/pingcap/tiflash/issues/XXXX
     pub fn maybe_jemalloc_register_alloc(&self) {
-        JEMALLOC_REGISTERED.with(|b| {
-            if !*b.borrow() {
-                unsafe {
-                    let ptr_alloc: u64 = crate::jemalloc_utils::get_allocatep_on_thread_start();
-                    let ptr_dealloc: u64 = crate::jemalloc_utils::get_deallocatep_on_thread_start();
-                    let thread_name = std::thread::current().name().unwrap_or("").to_string();
-                    let thread_id: u64 = std::thread::current().id().as_u64().into();
-                    (self.fn_report_thread_allocate_info.into_inner())(
-                        self.inner,
-                        thread_id,
-                        BaseBuffView::from(thread_name.as_bytes()),
-                        interfaces_ffi::ReportThreadAllocateInfoType::Reset,
-                        0,
-                    );
-                    (self.fn_report_thread_allocate_info.into_inner())(
-                        self.inner,
-                        thread_id,
-                        BaseBuffView::from(thread_name.as_bytes()),
-                        interfaces_ffi::ReportThreadAllocateInfoType::AllocPtr,
-                        ptr_alloc,
-                    );
-                    (self.fn_report_thread_allocate_info.into_inner())(
-                        self.inner,
-                        thread_id,
-                        BaseBuffView::from(thread_name.as_bytes()),
-                        interfaces_ffi::ReportThreadAllocateInfoType::DeallocPtr,
-                        ptr_dealloc,
-                    );
-
-                    // Some threads are not everlasting, so we don't want TiFlash to directly access
-                    // the pointer.
-                    JEMALLOC_TNAME.with(|p| {
-                        *p.borrow_mut() = (thread_name, thread_id);
-                    });
-                    if ptr_alloc != 0 {
-                        JEMALLOC_ALLOCP.with(|p| {
-                            *p.borrow_mut() = ptr_alloc as *mut u64;
-                        });
-                    }
-                    if ptr_dealloc != 0 {
-                        JEMALLOC_DEALLOCP.with(|p| {
-                            *p.borrow_mut() = ptr_dealloc as *mut u64;
-                        });
-                    }
-                }
-                *(b.borrow_mut()) = true;
-            }
-        });
+        // No-op: jemalloc tracking disabled
     }
 
     pub fn directly_report_jemalloc_alloc(&self) {
-        JEMALLOC_TNAME.with(|thread_info| unsafe {
-            let a = JEMALLOC_ALLOCP.with(|p| {
-                let p = *p.borrow_mut();
-                if p.is_null() {
-                    return 0;
-                }
-                *p
-            });
-            let d = JEMALLOC_DEALLOCP.with(|p| {
-                let p = *p.borrow_mut();
-                if p.is_null() {
-                    return 0;
-                }
-                *p
-            });
-            (self.fn_report_thread_allocate_batch.into_inner())(
-                self.inner,
-                thread_info.borrow().1,
-                BaseBuffView::from(thread_info.borrow().0.as_bytes()),
-                interfaces_ffi::ReportThreadAllocateInfoBatch {
-                    alloc: a,
-                    dealloc: d,
-                },
-            );
-        });
+        // No-op: jemalloc tracking disabled
     }
 
     pub fn gc_raw_cpp_ptr(&self, ptr: *mut ::std::os::raw::c_void, tp: RawCppPtrType) {

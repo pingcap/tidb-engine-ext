@@ -4,15 +4,13 @@
 
 use std::{
     collections::HashMap,
-    ptr::{self, NonNull},
-    slice,
+    ptr::NonNull,
     sync::Mutex,
     thread,
 };
 
-use libc::{self, c_char, c_void};
+use libc::{self, c_char};
 use tikv_jemalloc_ctl::{epoch, stats, Error};
-use tikv_jemalloc_sys::malloc_stats_print;
 
 use super::error::{ProfError, ProfResult};
 use crate::AllocStats;
@@ -138,34 +136,8 @@ use std::thread::ThreadId;
 pub use self::profiling::*;
 
 pub fn dump_stats() -> String {
-    let mut buf = Vec::with_capacity(1024);
-
-    unsafe {
-        malloc_stats_print(
-            Some(write_cb),
-            &mut buf as *mut Vec<u8> as *mut c_void,
-            ptr::null(),
-        );
-    }
-    let mut memory_stats = format!(
-        "Memory stats summary: {}\n",
-        String::from_utf8_lossy(&buf).into_owned()
-    );
-    memory_stats.push_str("Memory stats by thread:\n");
-
-    let thread_memory_map = THREAD_MEMORY_MAP.lock().unwrap();
-    for (_, accessor) in thread_memory_map.iter() {
-        let alloc = accessor.get_allocated();
-        let dealloc = accessor.get_deallocated();
-        memory_stats.push_str(
-            format!(
-                "Thread [{}]: alloc_bytes={alloc},dealloc_bytes={dealloc}\n",
-                accessor.thread_name
-            )
-            .as_str(),
-        );
-    }
-    memory_stats
+    // Empty implementation to avoid using malloc_stats_print when jemalloc is disabled
+    String::from("Memory stats not available (jemalloc disabled)\n")
 }
 
 pub fn fetch_stats() -> Result<Option<AllocStats>, Error> {
@@ -237,19 +209,6 @@ pub fn iterate_arena_allocation_stats(mut f: impl FnMut(&str, u64, u64, u64)) {
     }
     for (name, val) in collected {
         f(name, val.0, val.1, val.2)
-    }
-}
-
-#[allow(clippy::cast_ptr_alignment)]
-extern "C" fn write_cb(printer: *mut c_void, msg: *const c_char) {
-    unsafe {
-        // This cast from *c_void to *Vec<u8> looks like a bad
-        // cast to clippy due to pointer alignment, but we know
-        // what type the pointer is.
-        let buf = &mut *(printer as *mut Vec<u8>);
-        let len = libc::strlen(msg);
-        let bytes = slice::from_raw_parts(msg as *const u8, len);
-        buf.extend_from_slice(bytes);
     }
 }
 

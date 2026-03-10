@@ -184,7 +184,7 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
                 return true;
             }
             AdminCmdType::TransferLeader => {
-                error!("transfer leader won't exec";
+                info!("transfer leader will be ignored";
                         "region" => ?ob_region,
                         "req" => ?req,
                 );

@@ -6,7 +6,8 @@ on:
   #     - 'raftstore-proxy*'
   pull_request:
     branches:
-      - 'raftstore-proxy-*'
+      - 'raftstore-proxy-6.*'
+      - 'raftstore-proxy-5.*'
 
 jobs:
   build-check-old:

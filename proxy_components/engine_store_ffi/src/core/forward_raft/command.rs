@@ -309,7 +309,14 @@ impl<T: Transport + 'static, ER: RaftEngine> ProxyForwarder<T, ER> {
             }
         };
         if persist {
-            info!("should persist admin"; "region_id" => region_id, "peer_id" => region_state.peer_id, "state" => ?apply_state);
+            match cmd_type {
+                AdminCmdType::CompactLog => {
+                    debug!("should persist admin"; "region_id" => region_id, "peer_id" => region_state.peer_id, "state" => ?apply_state);
+                }
+                _ => {
+                    info!("should persist admin"; "region_id" => region_id, "peer_id" => region_state.peer_id, "state" => ?apply_state);
+                }
+            }
         }
         persist
     }

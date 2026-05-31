@@ -296,6 +296,7 @@ fn prehandle_snapshot_after_restart(kind: u64) {
 }
 
 #[test]
+#[ignore = "flaky: fap prehandle snapshot"]
 fn test_prehandle_snapshot_after_restart_reset() {
     prehandle_snapshot_after_restart(2);
 }

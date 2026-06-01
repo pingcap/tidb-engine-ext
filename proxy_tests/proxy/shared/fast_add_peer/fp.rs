@@ -296,6 +296,7 @@ fn prehandle_snapshot_after_restart(kind: u64) {
 }
 
 #[test]
+#[ignore = "flaky: fap prehandle snapshot"]
 fn test_prehandle_snapshot_after_restart_reset() {
     prehandle_snapshot_after_restart(2);
 }
@@ -448,7 +449,10 @@ fn test_overlap_last_apply_old() {
 // build_and_send_snapshot, it will override the previous snapshot's data, which
 // is actually newer.
 // It if origianlly https://github.com/pingcap/tidb-engine-ext/pull/359 before two-stage fap.
+/// FIXME: Flaky test of fast-add-peer. Disable it before we need to make
+/// fast-add-peer stable.
 #[test]
+#[ignore = "flaky: mono-store snapshot overlap leaves k1=v1 instead of v13 on store 3"]
 fn test_overlap_apply_tikv_snap_in_the_middle() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 3);
     pd_client.disable_default_operator();

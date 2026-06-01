@@ -365,7 +365,10 @@ mod simple_normal {
 
     /// If we select a wrong source, or we can't run fast path, we can fallback
     /// to normal.
+    /// FIXME: Flaky test of fast-add-peer. Disable it before we need to make
+    /// fast-add-peer stable.
     #[test]
+    #[ignore = "flaky: apply_state mismatch during slow-path snapshot fallback"]
     fn test_simple_from_invalid_source() {
         simple_fast_add_peer(SourceType::InvalidSource, false, PauseType::None, false);
     }

@@ -633,6 +633,25 @@ fn test_periodical_update() {
 }
 
 #[test]
+fn test_no_retry_request_triggers_reconnect() {
+    let eps_count = 3;
+    let server = MockServer::with_case(eps_count, Arc::new(LeaderChange::new()));
+    let eps = server.bind_addrs();
+
+    // Keep the periodic update out of the test so the failed store heartbeat is
+    // the only event that can trigger a reconnect.
+    let client = new_client_with_update_interval(eps, None, ReadableDuration::secs(3600));
+    let old_leader = client.get_leader();
+
+    thread::sleep(LeaderChange::get_leader_interval());
+    // Store heartbeat uses NO_RETRY. It should still return the first error,
+    // but reconnect the PD client before returning.
+    block_on(client.store_heartbeat(Default::default(), None, None)).unwrap_err();
+    assert_ne!(client.get_leader(), old_leader);
+    block_on(client.store_heartbeat(Default::default(), None, None)).unwrap();
+}
+
+#[test]
 fn test_cluster_version() {
     let server = MockServer::<Service>::new(3);
     let eps = server.bind_addrs();

@@ -451,6 +451,7 @@ const MAX_REQUEST_COUNT: usize = 3;
 impl<Req, Resp, F> Request<Req, F>
 where
     Req: Clone + Send + 'static,
+    Resp: Send,
     F: FnMut(&Client, Req) -> PdFuture<Resp> + Send + 'static,
 {
     async fn reconnect_if_needed(&mut self) -> Result<()> {
@@ -511,6 +512,12 @@ where
                 {
                     let resp = self.send_and_receive().await;
                     if self.should_not_retry(&resp) {
+                        let should_reconnect = matches!(&resp, Err(err) if err.should_reconnect());
+                        if should_reconnect {
+                            if let Err(e) = self.client.reconnect(true).await {
+                                warn!("failed to update PD client after request failure"; "error" => ?e);
+                            }
+                        }
                         return resp;
                     }
                 }

@@ -147,7 +147,12 @@ fn hijack_unary<F, R, C: PdMocker>(
                 .unwrap_or_else(|e| error!("failed to reply: {:?}", e)),
         ),
         Some(Err(err)) => {
-            let status = RpcStatus::with_message(RpcStatusCode::UNKNOWN, format!("{:?}", err));
+            let (code, message) = if err == "not leader" {
+                (RpcStatusCode::UNAVAILABLE, err)
+            } else {
+                (RpcStatusCode::UNKNOWN, format!("{:?}", err))
+            };
+            let status = RpcStatus::with_message(code, message);
             ctx.spawn(
                 sink.fail(status)
                     .unwrap_or_else(|e| error!("failed to reply: {:?}", e)),

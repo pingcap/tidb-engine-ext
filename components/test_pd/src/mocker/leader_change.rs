@@ -86,6 +86,22 @@ impl PdMocker for LeaderChange {
         Some(Ok(GetRegionResponse::default()))
     }
 
+    fn store_heartbeat(&self, _: &StoreHeartbeatRequest) -> Option<Result<StoreHeartbeatResponse>> {
+        let inner = self.inner.lock().unwrap();
+        if Instant::now().saturating_duration_since(inner.r.ts)
+            > LeaderChange::get_leader_interval()
+        {
+            return Some(Err("not leader".to_owned()));
+        }
+        let mut resp = StoreHeartbeatResponse::default();
+        resp.set_header(
+            inner.resps[inner.r.idx % inner.resps.len()]
+                .get_header()
+                .clone(),
+        );
+        Some(Ok(resp))
+    }
+
     fn set_endpoints(&self, eps: Vec<String>) {
         let mut members = Vec::with_capacity(eps.len());
         for (i, ep) in eps.iter().enumerate() {

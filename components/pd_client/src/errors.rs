@@ -52,6 +52,22 @@ impl Error {
             | Error::UnsafeServiceGcSafePoint { .. } => false,
         }
     }
+
+    pub(crate) fn should_reconnect(&self) -> bool {
+        fn is_connection_failure(status: &grpcio::RpcStatus) -> bool {
+            matches!(
+                status.code(),
+                grpcio::RpcStatusCode::UNAVAILABLE | grpcio::RpcStatusCode::DEADLINE_EXCEEDED
+            )
+        }
+
+        match self {
+            Error::Grpc(grpcio::Error::RpcFailure(status)) => is_connection_failure(status),
+            Error::Grpc(grpcio::Error::RpcFinished(Some(status))) => is_connection_failure(status),
+            Error::Grpc(grpcio::Error::RemoteStopped) | Error::StreamDisconnect(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl ErrorCodeExt for Error {

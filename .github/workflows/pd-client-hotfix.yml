@@ -14,12 +14,9 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_HTTP_PROXY: ''
-      http_proxy: ''
-      https_proxy: ''
       HTTP_PROXY: ''
       HTTPS_PROXY: ''
       ALL_PROXY: ''
-      all_proxy: ''
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'

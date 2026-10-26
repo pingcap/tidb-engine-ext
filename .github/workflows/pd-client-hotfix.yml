@@ -1,0 +1,60 @@
+name: PD client hotfix CI
+
+on:
+  pull_request:
+    branches:
+      - hotfix-pd-leader-reconnect-8.5.4
+
+permissions:
+  contents: read
+
+jobs:
+  pd-client-hotfix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_HTTP_PROXY: ''
+      http_proxy: ''
+      https_proxy: ''
+      HTTP_PROXY: ''
+      HTTPS_PROXY: ''
+      ALL_PROXY: ''
+      all_proxy: ''
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_BUILD_JOBS: '4'
+      LIBCLANG_PATH: /usr/lib/llvm-17/lib
+      LLVM_CONFIG_PATH: /usr/bin/llvm-config-17
+      CLANG_PATH: /usr/bin/clang-17
+      CC: clang-17
+      CXX: clang++-17
+      ENGINE_LABEL_VALUE: tiflash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: pd-hotfix-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Install the repository Rust toolchain
+        run: rustup show active-toolchain
+      - uses: arduino/setup-protoc@v1
+        with:
+          version: '3.8.0'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Check generated FFI with LLVM 17
+        run: |
+          clang-format-17 --dry-run --Werror -style=google raftstore-proxy/ffi/src/RaftStoreProxyFFI/*.h
+          cargo run --locked --package gen-proxy-ffi --bin gen_proxy_ffi
+          git diff --exit-code -- raftstore-proxy/ffi/src/RaftStoreProxyFFI proxy_components/proxy_ffi/src/interfaces.rs
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Run legacy PD client regression tests
+        run: |
+          cargo test --locked --package tests --features tikv/openssl-vendored \
+            --test integrations pd::test_rpc_client_legacy:: \
+            -- --nocapture --test-threads=1

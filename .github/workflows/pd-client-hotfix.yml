@@ -26,12 +26,15 @@ jobs:
       CLANG_PATH: /usr/bin/clang-17
       CC: clang-17
       CXX: clang++-17
+      # Legacy gRPC/Abseil relies on transitive includes removed by libstdc++ 13.
+      CXXFLAGS: -include cstdint
       ENGINE_LABEL_VALUE: tiflash
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
       - uses: actions/cache@v4
+        id: cargo-cache
         with:
           path: |
             ~/.cargo/registry
@@ -50,6 +53,14 @@ jobs:
           git diff --exit-code -- raftstore-proxy/ffi/src/RaftStoreProxyFFI proxy_components/proxy_ffi/src/interfaces.rs
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
+      - name: Save downloaded dependencies
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: pd-hotfix-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - name: Run legacy PD client regression tests
         run: |
           cargo test --locked --package tests --features tikv/openssl-vendored \

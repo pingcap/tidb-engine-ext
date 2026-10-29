@@ -22,7 +22,7 @@ use log_wrappers::RedactOption;
 use online_config::{ConfigChange, ConfigManager, OnlineConfig, Result as CfgResult};
 use tikv_util::info;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default, OnlineConfig)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, OnlineConfig)]
 #[serde(default)]
 #[serde(rename_all = "kebab-case")]
 pub struct SecurityConfig {
@@ -42,6 +42,20 @@ pub struct SecurityConfig {
     pub redact_info_log: RedactOption,
     #[online_config(skip)]
     pub encryption: EncryptionConfig,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            ca_path: String::default(),
+            cert_path: String::default(),
+            key_path: String::default(),
+            override_ssl_target: String::default(),
+            cert_allowed_cn: HashSet::default(),
+            redact_info_log: RedactOption::On,
+            encryption: EncryptionConfig::default(),
+        }
+    }
 }
 
 /// Checks and opens key file. Returns `Ok(None)` if the path is empty.
@@ -318,6 +332,7 @@ mod tests {
     #[test]
     fn test_security() {
         let cfg = SecurityConfig::default();
+        assert_eq!(cfg.redact_info_log, RedactOption::On);
         // default is disable secure connection.
         cfg.validate().unwrap();
         let mgr = SecurityManager::new(&cfg).unwrap();

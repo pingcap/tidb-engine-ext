@@ -1,5 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 use clap::{App, Arg};
+use log_wrappers::RedactOption;
 use proxy_server::{
     config::{
         address_proxy_config, memory_limit_for_cf, TIFLASH_DEFAULT_ADVERTISE_LISTENING_ADDR,
@@ -36,6 +37,7 @@ fn test_default_no_config_file() {
     address_proxy_config(&mut config, &proxy_config);
 
     assert_eq!(config.server.addr, TIFLASH_DEFAULT_LISTENING_ADDR);
+    assert_eq!(config.security.redact_info_log, RedactOption::On);
     assert_eq!(config.server.status_addr, TIFLASH_DEFAULT_STATUS_ADDR);
     assert_eq!(
         config.server.advertise_status_addr,
@@ -93,6 +95,7 @@ fn test_default_no_config_item() {
     let total_mem = SysQuota::memory_limit_in_bytes();
     let cpu_num = SysQuota::cpu_cores_quota();
     assert_eq!(config.rocksdb.max_open_files, 56);
+    assert_eq!(config.security.redact_info_log, RedactOption::On);
     assert_eq!(config.server.addr, TIFLASH_DEFAULT_LISTENING_ADDR);
     assert_eq!(config.server.status_addr, TIFLASH_DEFAULT_STATUS_ADDR);
     assert_eq!(
@@ -144,6 +147,28 @@ fn test_default_no_config_item() {
     assert_eq!(config.server.reject_messages_on_memory_ratio, 0.05);
 
     assert_eq!(config.raft_store.enable_v2_compatible_learner, true);
+}
+
+#[test]
+fn test_redact_info_log_config() {
+    for (text, expected) in [
+        ("", RedactOption::On),
+        ("[security]", RedactOption::On),
+        ("[security]\nca-path = \"\"", RedactOption::On),
+        ("[security]\nredact-info-log = true", RedactOption::On),
+        ("[security]\nredact-info-log = false", RedactOption::Off),
+        ("[security]\nredact-info-log = \"on\"", RedactOption::On),
+        ("[security]\nredact-info-log = \"off\"", RedactOption::Off),
+        (
+            "[security]\nredact-info-log = \"marker\"",
+            RedactOption::Marker,
+        ),
+    ] {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(file, "{}", text).unwrap();
+        let config = gen_tikv_config(&Some(file.path().as_os_str()), false, &mut Vec::new());
+        assert_eq!(config.security.redact_info_log, expected, "{text}");
+    }
 }
 
 #[test]

@@ -10,6 +10,48 @@ fn setup_fp_for_fap() {
     fail::cfg("on_apply_snapshot_committed_allow_no_unips", "return").unwrap();
 }
 
+fn must_wait_fap_snapshot_applying(
+    cluster_ext: &ClusterExt,
+    region_id: u64,
+    store_id: u64,
+    peer_id: u64,
+) {
+    // Temporary FAP data is visible before the synthetic Raft snapshot is sent.
+    // Wait until the receiver persists Applying before interrupting its lifecycle.
+    must_wait_until_cond_generic(cluster_ext, region_id, Some(vec![store_id]), &|_| {
+        let mut ready = false;
+        cluster_ext.iter_ffi_helpers(Some(vec![store_id]), &mut |_, ffi: &mut FFIHelperSet| {
+            let fap_state = ffi
+                .engine_store_server_helper
+                .query_fap_snapshot_state(region_id, peer_id, 0, 0);
+            let engine = &ffi.engine_store_server.engines.as_ref().unwrap().kv;
+            let region_state = general_get_region_local_state(engine, region_id);
+            ready = fap_state == proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted
+                && region_state.map_or(false, |state| state.get_state() == PeerState::Applying);
+        });
+        ready
+    });
+}
+
+fn must_wait_fap_snapshot_removed(
+    cluster_ext: &ClusterExt,
+    region_id: u64,
+    store_id: u64,
+    peer_id: u64,
+) {
+    // Data and Region state are visible before the commit hook removes FAP data.
+    must_wait_until_cond_generic(cluster_ext, region_id, Some(vec![store_id]), &|_| {
+        let mut removed = false;
+        cluster_ext.iter_ffi_helpers(Some(vec![store_id]), &mut |_, ffi: &mut FFIHelperSet| {
+            removed = ffi
+                .engine_store_server_helper
+                .query_fap_snapshot_state(region_id, peer_id, 0, 0)
+                == proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound;
+        });
+        removed
+    });
+}
+
 #[test]
 fn test_disable_fap() {
     tikv_util::set_panic_hook(true, "./");
@@ -200,37 +242,21 @@ fn prehandle_snapshot_after_restart(kind: u64) {
 
     let _ = cluster.run_conf_change();
     cluster.must_put(b"k1", b"v1");
+    cluster.must_put(b"k3", b"v3");
 
     fail::cfg("fap_mock_add_peer_from_id", "return(4)").unwrap();
     pd_client.must_add_peer(1, new_learner_peer(2, 2002));
-    cluster.must_put(b"k3", b"v3");
     check_key(&cluster, b"k1", b"v1", None, Some(true), Some(vec![2]));
+    check_key(&cluster, b"k3", b"v3", None, Some(true), Some(vec![2]));
 
     fail::cfg("fap_mock_add_peer_from_id", "return(2)").unwrap();
 
+    // Pause before adding the peer so snapshot application cannot race the
+    // simulated restart below.
+    fail::cfg("on_ob_pre_handle_snapshot_s3", "pause").unwrap();
     pd_client.must_add_peer(1, new_learner_peer(3, 3003));
 
-    // Delay, so the tikv snapshot comes after fap snapshot in pending_applies
-    // queue.
-    fail::cfg("on_ob_pre_handle_snapshot_s3", "pause").unwrap();
-
-    // Wait fap phase1 finished.
-    let mut iter = 0;
-    loop {
-        let mut res = false;
-        iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
-            res = ffi
-                .engine_store_server_helper
-                .query_fap_snapshot_state(1, 3003, 0, 0)
-                == proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted;
-        });
-        if res {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        assert!(iter <= 5);
-        iter += 1;
-    }
+    must_wait_fap_snapshot_applying(&cluster.cluster_ext, 1, 3, 3003);
     // Mock cached region info manager is cleared.
     iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
         if kind == 1 {
@@ -283,7 +309,6 @@ fn prehandle_snapshot_after_restart(kind: u64) {
         }
     });
 
-    fail::remove("on_ob_pre_handle_snapshot_s3");
     // Under this case, still reuse the fap snapshot.
     fail::cfg("fap_core_no_prehandle", "panic").unwrap();
     iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
@@ -293,9 +318,11 @@ fn prehandle_snapshot_after_restart(kind: u64) {
             proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted
         );
     });
+    fail::remove("on_ob_pre_handle_snapshot_s3");
 
     // And it can be deleted.
     check_key(&cluster, b"k3", b"v3", None, Some(true), Some(vec![3]));
+    cluster.shutdown();
 
     fail::remove("post_apply_snapshot_allow_no_unips");
     fail::remove("apply_on_handle_snapshot_sync");
@@ -885,18 +912,7 @@ fn do_test_fall_back_to_slow_path(reuse_fap_snapshot: bool) {
         },
     );
 
-    // Data is visible before the snapshot commit hook clears the temporary FAP
-    // snapshot.
-    must_wait_until_cond_generic(&cluster.cluster_ext, 1, Some(vec![2]), &|_| {
-        let mut cleared = false;
-        iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
-            cleared = ffi
-                .engine_store_server_helper
-                .query_fap_snapshot_state(1, 2, 0, 0)
-                == proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound;
-        });
-        cleared
-    });
+    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 2, 2);
 
     fail::remove("fap_mock_fail_after_write");
     fail::remove("on_can_apply_snapshot");
@@ -1068,13 +1084,7 @@ fn test_msgsnapshot_before_msgappend() {
         },
     );
 
-    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
-        assert_eq!(
-            ffi.engine_store_server_helper
-                .query_fap_snapshot_state(1, 2, 0, 0),
-            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
-        );
-    });
+    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 2, 2);
 
     fail::remove("on_can_apply_snapshot");
     fail::remove("on_pre_write_apply_state");
@@ -1114,6 +1124,7 @@ fn test_replay_fap_after_post_apply() {
 
     check_key(&cluster, b"k2", b"v2", Some(false), None, Some(vec![2]));
 
+    must_wait_fap_snapshot_applying(&cluster.cluster_ext, 1, 2, 2);
     stop_tiflash_node(&mut cluster, 2);
     iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
         assert_eq!(
@@ -1137,13 +1148,7 @@ fn test_replay_fap_after_post_apply() {
         },
     );
 
-    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
-        assert_eq!(
-            ffi.engine_store_server_helper
-                .query_fap_snapshot_state(1, 2, 0, 0),
-            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
-        );
-    });
+    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 2, 2);
     fail::remove("on_pre_write_apply_state");
     fail::remove("on_can_apply_snapshot");
     fail::remove("post_apply_snapshot_allow_no_unips");
@@ -1178,6 +1183,7 @@ fn test_replay_fap_before_post_apply() {
 
     check_key(&cluster, b"k2", b"v2", Some(false), None, Some(vec![2]));
 
+    must_wait_fap_snapshot_applying(&cluster.cluster_ext, 1, 2, 2);
     stop_tiflash_node(&mut cluster, 2);
     iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
         assert_eq!(
@@ -1203,13 +1209,7 @@ fn test_replay_fap_before_post_apply() {
         },
     );
 
-    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
-        assert_eq!(
-            ffi.engine_store_server_helper
-                .query_fap_snapshot_state(1, 2, 0, 0),
-            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
-        );
-    });
+    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 2, 2);
     fail::remove("on_pre_write_apply_state");
     fail::remove("on_can_apply_snapshot");
     fail::remove("post_apply_snapshot_allow_no_unips");

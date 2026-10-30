@@ -145,9 +145,43 @@ fn simple_fast_add_peer(
     }
 
     debug!("=== try add 3 by fap ===");
+    if source_type == SourceType::InvalidSource {
+        // This source must fall back to a normal leader snapshot. The mock
+        // buffers normal writes, so let the add-peer admin persist both k2 and
+        // its apply state before the receiver can request that snapshot.
+        cluster.must_put(b"k2", b"v2");
+        cluster.add_send_filter(CloneFilterFactory(
+            RegionPacketFilter::new(1, 3)
+                .msg_type(MessageType::MsgAppend)
+                .msg_type(MessageType::MsgSnapshot)
+                .direction(Direction::Recv),
+        ));
+    }
     // Add peer 3 by FAP
     pd_client.must_add_peer(1, new_learner_peer(3, 3));
-    cluster.must_put(b"k2", b"v2");
+    if source_type != SourceType::InvalidSource {
+        cluster.must_put(b"k2", b"v2");
+    }
+    if source_type == SourceType::InvalidSource {
+        check_key(
+            &cluster,
+            b"k2",
+            b"v2",
+            Some(true),
+            Some(true),
+            Some(vec![1]),
+        );
+        must_wait_until_cond_node(
+            &cluster.cluster_ext,
+            1,
+            Some(vec![1]),
+            &|states: &States| {
+                states.in_memory_apply_state.get_applied_index()
+                    == states.in_disk_apply_state.get_applied_index()
+            },
+        );
+        cluster.clear_send_filters();
+    }
 
     let need_fallback = check_timeout;
 

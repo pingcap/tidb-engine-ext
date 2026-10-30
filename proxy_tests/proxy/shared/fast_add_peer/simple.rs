@@ -1,4 +1,5 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
+use super::must_wait_fap_snapshot_removed;
 use crate::utils::v1::*;
 
 #[derive(PartialEq, Eq)]
@@ -241,13 +242,7 @@ fn simple_fast_add_peer(
         },
     );
 
-    iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
-        assert_eq!(
-            ffi.engine_store_server_helper
-                .query_fap_snapshot_state(1, 3, 0, 0),
-            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
-        );
-    });
+    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 3, 3);
 
     match pause {
         PauseType::ApplySnapshot => {

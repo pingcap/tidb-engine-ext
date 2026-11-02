@@ -2,12 +2,37 @@
 use std::collections::hash_map::Entry as MapEntry;
 
 use engine_tiflash::CachedRegionInfo;
+use engine_traits::SyncMutable;
 
+use super::must_wait_fap_snapshot_removed;
 use crate::utils::v1::*;
 
 fn setup_fp_for_fap() {
     fail::cfg("post_apply_snapshot_allow_no_unips", "return").unwrap();
     fail::cfg("on_apply_snapshot_committed_allow_no_unips", "return").unwrap();
+}
+
+fn must_wait_fap_snapshot_applying(
+    cluster_ext: &ClusterExt,
+    region_id: u64,
+    store_id: u64,
+    peer_id: u64,
+) {
+    // Temporary FAP data is visible before the synthetic Raft snapshot is sent.
+    // Wait until the receiver persists Applying before interrupting its lifecycle.
+    must_wait_until_cond_generic(cluster_ext, region_id, Some(vec![store_id]), &|_| {
+        let mut ready = false;
+        cluster_ext.iter_ffi_helpers(Some(vec![store_id]), &mut |_, ffi: &mut FFIHelperSet| {
+            let fap_state = ffi
+                .engine_store_server_helper
+                .query_fap_snapshot_state(region_id, peer_id, 0, 0);
+            let engine = &ffi.engine_store_server.engines.as_ref().unwrap().kv;
+            let region_state = general_get_region_local_state(engine, region_id);
+            ready = fap_state == proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted
+                && region_state.map_or(false, |state| state.get_state() == PeerState::Applying);
+        });
+        ready
+    });
 }
 
 #[test]
@@ -200,37 +225,21 @@ fn prehandle_snapshot_after_restart(kind: u64) {
 
     let _ = cluster.run_conf_change();
     cluster.must_put(b"k1", b"v1");
+    cluster.must_put(b"k3", b"v3");
 
     fail::cfg("fap_mock_add_peer_from_id", "return(4)").unwrap();
     pd_client.must_add_peer(1, new_learner_peer(2, 2002));
-    cluster.must_put(b"k3", b"v3");
     check_key(&cluster, b"k1", b"v1", None, Some(true), Some(vec![2]));
+    check_key(&cluster, b"k3", b"v3", None, Some(true), Some(vec![2]));
 
     fail::cfg("fap_mock_add_peer_from_id", "return(2)").unwrap();
 
+    // Pause before adding the peer so snapshot application cannot race the
+    // simulated restart below.
+    fail::cfg("on_ob_pre_handle_snapshot_s3", "pause").unwrap();
     pd_client.must_add_peer(1, new_learner_peer(3, 3003));
 
-    // Delay, so the tikv snapshot comes after fap snapshot in pending_applies
-    // queue.
-    fail::cfg("on_ob_pre_handle_snapshot_s3", "pause").unwrap();
-
-    // Wait fap phase1 finished.
-    let mut iter = 0;
-    loop {
-        let mut res = false;
-        iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
-            res = ffi
-                .engine_store_server_helper
-                .query_fap_snapshot_state(1, 3003, 0, 0)
-                == proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted;
-        });
-        if res {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        assert!(iter <= 5);
-        iter += 1;
-    }
+    must_wait_fap_snapshot_applying(&cluster.cluster_ext, 1, 3, 3003);
     // Mock cached region info manager is cleared.
     iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
         if kind == 1 {
@@ -283,7 +292,6 @@ fn prehandle_snapshot_after_restart(kind: u64) {
         }
     });
 
-    fail::remove("on_ob_pre_handle_snapshot_s3");
     // Under this case, still reuse the fap snapshot.
     fail::cfg("fap_core_no_prehandle", "panic").unwrap();
     iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
@@ -293,9 +301,11 @@ fn prehandle_snapshot_after_restart(kind: u64) {
             proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted
         );
     });
+    fail::remove("on_ob_pre_handle_snapshot_s3");
 
     // And it can be deleted.
     check_key(&cluster, b"k3", b"v3", None, Some(true), Some(vec![3]));
+    cluster.shutdown();
 
     fail::remove("post_apply_snapshot_allow_no_unips");
     fail::remove("apply_on_handle_snapshot_sync");
@@ -464,10 +474,11 @@ fn test_overlap_last_apply_old() {
 // It if origianlly https://github.com/pingcap/tidb-engine-ext/pull/359 before two-stage fap.
 #[test]
 fn test_overlap_apply_tikv_snap_in_the_middle() {
+    const SPLIT_REGION_ID: u64 = 1000;
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 3);
     pd_client.disable_default_operator();
     disable_auto_gen_compact_log(&mut cluster);
-    fail::cfg("fap_core_fallback_millis", "return(2000)").unwrap();
+    fail::cfg("fap_core_fallback_millis", "return(0)").unwrap();
     setup_fp_for_fap();
     cluster.cfg.proxy_cfg.engine_store.enable_fast_add_peer = true;
     cluster.cfg.tikv.raft_store.store_batch_system.pool_size = 4;
@@ -483,14 +494,38 @@ fn test_overlap_apply_tikv_snap_in_the_middle() {
     cluster.must_put(b"k1", b"v1");
     cluster.must_put(b"k3", b"v3");
 
+    // Only node 1's ordinary snapshots to store 3 are blocked. The synthetic
+    // FAP snapshot uses store 3's transport and must remain deliverable.
+    cluster.sim.write().unwrap().add_send_filter(
+        1,
+        Box::new(
+            RegionPacketFilter::new(SPLIT_REGION_ID, 3)
+                .direction(Direction::Recv)
+                .msg_type(MessageType::MsgSnapshot),
+        ),
+    );
+
     // Use an invalid store id to make FAP fallback.
     fail::cfg("fap_mock_add_peer_from_id", "return(4)").unwrap();
 
     // Don't use send filter to prevent applying snapshot,
     // since it may no longer send snapshot after split.
-    fail::cfg("fap_on_msg_snapshot_1_3003", "pause").unwrap();
+    let (old_snapshot_tx, old_snapshot_rx) = mpsc::sync_channel(1);
+    let (resume_old_tx, resume_old_rx) = mpsc::sync_channel(1);
+    let resume_old_rx = std::sync::Mutex::new(resume_old_rx);
+    fail::cfg_callback("fap_on_msg_snapshot_1_3003", move || {
+        old_snapshot_tx.send(()).unwrap();
+        resume_old_rx
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("old snapshot was not released");
+    })
+    .unwrap();
     pd_client.must_add_peer(1, new_learner_peer(3, 3003));
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    old_snapshot_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("old snapshot did not arrive before split");
 
     // Split
     check_key(&cluster, b"k1", b"v1", Some(true), None, Some(vec![1]));
@@ -501,6 +536,7 @@ fn test_overlap_apply_tikv_snap_in_the_middle() {
 
     let new_one_1000_k1 = cluster.get_region(b"k1");
     let old_one_1_k3 = cluster.get_region(b"k3"); // region_id = 1
+    assert_eq!(new_one_1000_k1.get_id(), SPLIT_REGION_ID);
     assert_ne!(new_one_1000_k1.get_id(), old_one_1_k3.get_id());
     pd_client.must_remove_peer(new_one_1000_k1.get_id(), new_learner_peer(3, 1002));
     assert_ne!(new_one_1000_k1.get_id(), old_one_1_k3.get_id());
@@ -524,7 +560,7 @@ fn test_overlap_apply_tikv_snap_in_the_middle() {
 
     // k1 was in old region, but reassigned to new region then.
     cluster.must_put(b"k1", b"v13");
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    check_key(&cluster, b"k1", b"v13", Some(true), None, Some(vec![1]));
 
     // Prepare a peer for FAP.
     pd_client.must_add_peer(new_one_1000_k1.get_id(), new_learner_peer(2, 2003));
@@ -539,6 +575,7 @@ fn test_overlap_apply_tikv_snap_in_the_middle() {
 
     // Wait for conf change.
     fail::cfg("fap_ffi_pause", "pause").unwrap();
+    fail::cfg("fap_ffi_pause_after_fap_call", "pause").unwrap();
     fail::cfg("fap_mock_add_peer_from_id", "return(2)").unwrap();
     debug!("=== add peer 3001 ===");
     // FAP will ingest data, but not finish applying snapshot due to failpoint.
@@ -551,11 +588,25 @@ fn test_overlap_apply_tikv_snap_in_the_middle() {
             states.in_disk_region_state.get_region().get_peers().len() == 3
         },
     );
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    fail::cfg("fap_ffi_pause_after_fap_call", "pause").unwrap();
-    debug!("=== peer 3001 pause send snap ===");
-    std::thread::sleep(std::time::Duration::from_millis(500));
     fail::remove("fap_ffi_pause");
+
+    must_wait_until_cond_generic(
+        &cluster.cluster_ext,
+        SPLIT_REGION_ID,
+        Some(vec![3]),
+        &|_| {
+            let mut persisted = false;
+            iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
+                persisted = ffi.engine_store_server_helper.query_fap_snapshot_state(
+                    SPLIT_REGION_ID,
+                    3001,
+                    0,
+                    0,
+                ) == proxy_ffi::interfaces_ffi::FapSnapshotState::Persisted;
+            });
+            persisted
+        },
+    );
 
     iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
         assert!(!ffi.engine_store_server.kvstore.contains_key(&1000));
@@ -578,6 +629,27 @@ fn test_overlap_apply_tikv_snap_in_the_middle() {
     // We will make the tikv snapshot apply.
     fail::remove("fap_mock_add_peer_from_id");
     fail::remove("fap_on_msg_snapshot_1_3003");
+    resume_old_tx.send(()).unwrap();
+
+    // A disk key in this mono-store engine does not identify which Region wrote
+    // it. Wait for the old parent to replay its split before releasing FAP.
+    must_wait_until_cond_node(
+        &cluster.cluster_ext,
+        old_one_1_k3.get_id(),
+        Some(vec![3]),
+        &|states: &States| states.in_disk_region_state.get_region().get_start_key() == b"k2",
+    );
+    // Persistence precedes the Raft poller's ApplyResult. Its routing table
+    // must also stop covering the child before the synthetic snapshot is sent.
+    let store_meta = cluster.store_metas.get(&3).unwrap().clone();
+    must_wait_until_cond_generic(&cluster.cluster_ext, 1, Some(vec![3]), &|_| {
+        store_meta
+            .lock()
+            .unwrap()
+            .regions
+            .get(&1)
+            .map_or(false, |region| region.get_start_key() == b"k2")
+    });
 
     check_key_ex(
         &cluster,
@@ -590,9 +662,9 @@ fn test_overlap_apply_tikv_snap_in_the_middle() {
         true,
     );
     // Make FAP continue after the tikv snapshot is applied.
+    fail::cfg("fap_core_must_shared_snapshot", "panic").unwrap();
     fail::remove("fap_ffi_pause_after_fap_call");
     debug!("=== peer 3001 allow send snap ===");
-    std::thread::sleep(std::time::Duration::from_millis(2000));
     check_key_ex(
         &cluster,
         b"k1",
@@ -605,11 +677,137 @@ fn test_overlap_apply_tikv_snap_in_the_middle() {
     );
 
     fail::remove("fap_core_fallback_millis");
+    fail::remove("fap_core_must_shared_snapshot");
     fail::remove("fap_mock_add_peer_from_id");
     fail::remove("on_can_apply_snapshot");
     fail::remove("apply_on_handle_snapshot_sync");
     fail::remove("on_pre_write_apply_state");
     cluster.shutdown();
+}
+
+fn do_test_stale_split_child(tombstone: bool) {
+    let (mut cluster, _) = new_mock_cluster_snap(0, 1);
+    disable_auto_gen_compact_log(&mut cluster);
+    cluster.run_conf_change();
+    cluster.must_put(b"k1", b"v1");
+    cluster.must_put(b"k3", b"v3");
+    let parent_meta = cluster.get_region(b"k1");
+
+    iter_ffi_helpers(&cluster, Some(vec![1]), &mut |_, ffi: &mut FFIHelperSet| {
+        let store = &mut ffi.engine_store_server;
+        let parent = store.kvstore.get_mut(&1).unwrap();
+        // Bootstrap writes create a mock Region before an admin response has
+        // supplied its metadata. Seed it from Proxy for this direct FFI replay.
+        parent.region = parent_meta.clone();
+        parent.peer = parent_meta
+            .get_peers()
+            .iter()
+            .find(|peer| peer.get_store_id() == 1)
+            .unwrap()
+            .clone();
+        let index = parent.apply_state.get_applied_index() + 1;
+        let term = parent.applied_term;
+        let mut derived = parent.region.clone();
+        derived.set_start_key(b"k2".to_vec());
+        let mut split_child = parent.region.clone();
+        split_child.set_id(1000);
+        split_child.set_end_key(b"k2".to_vec());
+        split_child.set_peers(vec![test_raftstore::new_peer(1, 1002)].into());
+
+        // Old writes and deletes must not overwrite data owned by a newer peer
+        // in the shared engine, even in column families other than default.
+        for cf in 0..3 {
+            parent.pending_write[cf].insert(b"k1".to_vec(), b"v1".to_vec());
+            parent.pending_delete[cf].insert(b"k0".to_vec());
+        }
+        let mut current_child = split_child.clone();
+        current_child.set_peers(vec![test_raftstore::new_peer(1, 3001)].into());
+        let mut child_state = RegionLocalState::default();
+        child_state.set_region(current_child.clone());
+        child_state.set_state(if tombstone {
+            PeerState::Tombstone
+        } else {
+            PeerState::Normal
+        });
+        let engine = &store.engines.as_ref().unwrap().kv.rocks;
+        engine
+            .put_msg_cf(CF_RAFT, &keys::region_state_key(1000), &child_state)
+            .unwrap();
+        for cf in [CF_DEFAULT, CF_LOCK, CF_WRITE] {
+            engine.put_cf(cf, &keys::data_key(b"k1"), b"v13").unwrap();
+            engine
+                .put_cf(cf, &keys::data_key(b"k0"), b"v0-new")
+                .unwrap();
+        }
+        if !tombstone {
+            let mut child = make_new_region(Some(current_child), Some(1));
+            child.set_applied(10, 6);
+            for cf in 0..3 {
+                write_kv_in_mem(&mut child, cf, b"k1", b"v13");
+                write_kv_in_mem(&mut child, cf, b"k0", b"v0-new");
+            }
+            store.kvstore.insert(1000, Box::new(child));
+        }
+
+        let mut request = kvproto::raft_cmdpb::AdminRequest::default();
+        request.set_cmd_type(AdminCmdType::BatchSplit);
+        let mut response = kvproto::raft_cmdpb::AdminResponse::default();
+        response.mut_splits().mut_regions().push(split_child);
+        response.mut_splits().mut_regions().push(derived);
+        ffi.engine_store_server_helper.handle_admin_raft_cmd(
+            &request,
+            &response,
+            proxy_ffi::interfaces_ffi::RaftCmdHeader::new(1, index, term),
+        );
+
+        let store = &ffi.engine_store_server;
+        if tombstone {
+            assert!(!store.kvstore.contains_key(&1000));
+        } else {
+            let child = store.kvstore.get(&1000).unwrap();
+            assert_eq!(child.peer.get_id(), 3001);
+            assert_eq!(child.apply_state.get_applied_index(), 10);
+            for cf in 0..3 {
+                assert_eq!(child.data[cf].get(b"k1".as_slice()).unwrap(), b"v13");
+                assert_eq!(child.data[cf].get(b"k0".as_slice()).unwrap(), b"v0-new");
+            }
+        }
+        let parent = store.kvstore.get(&1).unwrap();
+        let default_cf = proxy_ffi::interfaces_ffi::ColumnFamilyType::Default as usize;
+        assert_eq!(
+            parent.data[default_cf].get(b"k3".as_slice()).unwrap(),
+            b"v3"
+        );
+        assert!(!parent.data[default_cf].contains_key(b"k1".as_slice()));
+        let engine = &store.engines.as_ref().unwrap().kv.rocks;
+        for cf in [CF_DEFAULT, CF_LOCK, CF_WRITE] {
+            assert_eq!(
+                engine
+                    .get_value_cf(cf, &keys::data_key(b"k1"))
+                    .unwrap()
+                    .unwrap(),
+                b"v13"
+            );
+            assert_eq!(
+                engine
+                    .get_value_cf(cf, &keys::data_key(b"k0"))
+                    .unwrap()
+                    .unwrap(),
+                b"v0-new"
+            );
+        }
+    });
+    cluster.shutdown();
+}
+
+#[test]
+fn test_stale_split_does_not_revive_tombstone_child() {
+    do_test_stale_split_child(true);
+}
+
+#[test]
+fn test_stale_split_preserves_newer_child() {
+    do_test_stale_split_child(false);
 }
 
 // If the peer is initialized, it will not use fap to catch up.
@@ -885,13 +1083,7 @@ fn do_test_fall_back_to_slow_path(reuse_fap_snapshot: bool) {
         },
     );
 
-    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
-        assert_eq!(
-            ffi.engine_store_server_helper
-                .query_fap_snapshot_state(1, 2, 0, 0),
-            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
-        );
-    });
+    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 2, 2);
 
     fail::remove("fap_mock_fail_after_write");
     fail::remove("on_can_apply_snapshot");
@@ -1063,13 +1255,7 @@ fn test_msgsnapshot_before_msgappend() {
         },
     );
 
-    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
-        assert_eq!(
-            ffi.engine_store_server_helper
-                .query_fap_snapshot_state(1, 2, 0, 0),
-            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
-        );
-    });
+    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 2, 2);
 
     fail::remove("on_can_apply_snapshot");
     fail::remove("on_pre_write_apply_state");
@@ -1109,6 +1295,7 @@ fn test_replay_fap_after_post_apply() {
 
     check_key(&cluster, b"k2", b"v2", Some(false), None, Some(vec![2]));
 
+    must_wait_fap_snapshot_applying(&cluster.cluster_ext, 1, 2, 2);
     stop_tiflash_node(&mut cluster, 2);
     iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
         assert_eq!(
@@ -1132,13 +1319,7 @@ fn test_replay_fap_after_post_apply() {
         },
     );
 
-    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
-        assert_eq!(
-            ffi.engine_store_server_helper
-                .query_fap_snapshot_state(1, 2, 0, 0),
-            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
-        );
-    });
+    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 2, 2);
     fail::remove("on_pre_write_apply_state");
     fail::remove("on_can_apply_snapshot");
     fail::remove("post_apply_snapshot_allow_no_unips");
@@ -1173,6 +1354,7 @@ fn test_replay_fap_before_post_apply() {
 
     check_key(&cluster, b"k2", b"v2", Some(false), None, Some(vec![2]));
 
+    must_wait_fap_snapshot_applying(&cluster.cluster_ext, 1, 2, 2);
     stop_tiflash_node(&mut cluster, 2);
     iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
         assert_eq!(
@@ -1198,13 +1380,7 @@ fn test_replay_fap_before_post_apply() {
         },
     );
 
-    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
-        assert_eq!(
-            ffi.engine_store_server_helper
-                .query_fap_snapshot_state(1, 2, 0, 0),
-            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
-        );
-    });
+    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 2, 2);
     fail::remove("on_pre_write_apply_state");
     fail::remove("on_can_apply_snapshot");
     fail::remove("post_apply_snapshot_allow_no_unips");

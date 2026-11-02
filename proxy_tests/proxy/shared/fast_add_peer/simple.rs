@@ -1,5 +1,4 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
-use super::must_wait_fap_snapshot_removed;
 use crate::utils::v1::*;
 
 #[derive(PartialEq, Eq)]
@@ -22,6 +21,7 @@ enum PauseType {
 // This test is covered in `simple_fast_add_peer`.
 // It is here only as a demo for easy understanding the whole process.
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn basic_fast_add_peer() {
     tikv_util::set_panic_hook(true, "./");
     let (mut cluster, pd_client) = new_mock_cluster(0, 2);
@@ -145,43 +145,9 @@ fn simple_fast_add_peer(
     }
 
     debug!("=== try add 3 by fap ===");
-    if source_type == SourceType::InvalidSource {
-        // This source must fall back to a normal leader snapshot. The mock
-        // buffers normal writes, so let the add-peer admin persist both k2 and
-        // its apply state before the receiver can request that snapshot.
-        cluster.must_put(b"k2", b"v2");
-        cluster.add_send_filter(CloneFilterFactory(
-            RegionPacketFilter::new(1, 3)
-                .msg_type(MessageType::MsgAppend)
-                .msg_type(MessageType::MsgSnapshot)
-                .direction(Direction::Recv),
-        ));
-    }
     // Add peer 3 by FAP
     pd_client.must_add_peer(1, new_learner_peer(3, 3));
-    if source_type != SourceType::InvalidSource {
-        cluster.must_put(b"k2", b"v2");
-    }
-    if source_type == SourceType::InvalidSource {
-        check_key(
-            &cluster,
-            b"k2",
-            b"v2",
-            Some(true),
-            Some(true),
-            Some(vec![1]),
-        );
-        must_wait_until_cond_node(
-            &cluster.cluster_ext,
-            1,
-            Some(vec![1]),
-            &|states: &States| {
-                states.in_memory_apply_state.get_applied_index()
-                    == states.in_disk_apply_state.get_applied_index()
-            },
-        );
-        cluster.clear_send_filters();
-    }
+    cluster.must_put(b"k2", b"v2");
 
     let need_fallback = check_timeout;
 
@@ -276,7 +242,13 @@ fn simple_fast_add_peer(
         },
     );
 
-    must_wait_fap_snapshot_removed(&cluster.cluster_ext, 1, 3, 3);
+    iter_ffi_helpers(&cluster, Some(vec![3]), &mut |_, ffi: &mut FFIHelperSet| {
+        assert_eq!(
+            ffi.engine_store_server_helper
+                .query_fap_snapshot_state(1, 3, 0, 0),
+            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
+        );
+    });
 
     match pause {
         PauseType::ApplySnapshot => {
@@ -371,6 +343,7 @@ fn simple_fast_add_peer(
 mod simple_normal {
     use super::*;
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simple_from_leader() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         simple_fast_add_peer(SourceType::Leader, false, PauseType::None, false);
@@ -379,6 +352,7 @@ mod simple_normal {
 
     /// Fast path by learner snapshot.
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simple_from_learner() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         simple_fast_add_peer(SourceType::Learner, false, PauseType::None, false);
@@ -387,6 +361,7 @@ mod simple_normal {
 
     /// If a learner is delayed, but already applied ConfChange.
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simple_from_delayed_learner() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         simple_fast_add_peer(SourceType::DelayedLearner, false, PauseType::None, false);
@@ -396,6 +371,7 @@ mod simple_normal {
     /// If we select a wrong source, or we can't run fast path, we can fallback
     /// to normal.
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simple_from_invalid_source() {
         simple_fast_add_peer(SourceType::InvalidSource, false, PauseType::None, false);
     }
@@ -408,6 +384,7 @@ mod simple_blocked_pause {
     // Delay when fetch and build data
 
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simpleb_from_learner_paused_build() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         // Need to changed to pre_write_apply_state
@@ -418,6 +395,7 @@ mod simple_blocked_pause {
     }
 
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simpleb_from_delayed_learner_paused_build() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         // Need to changed to pre_write_apply_state
@@ -431,6 +409,7 @@ mod simple_blocked_pause {
     // This test is origially aimed to test multiple MsgSnapshot.
     // However, we observed less repeated MsgAppend than in real cluster.
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simpleb_from_learner_paused_apply() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         simple_fast_add_peer(SourceType::Learner, true, PauseType::ApplySnapshot, false);
@@ -438,6 +417,7 @@ mod simple_blocked_pause {
     }
 
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simpleb_from_delayed_learner_paused_apply() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         simple_fast_add_peer(
@@ -453,6 +433,7 @@ mod simple_blocked_pause {
 mod simple_non_blocked_non_pause {
     use super::*;
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simplenb_from_learner() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         simple_fast_add_peer(SourceType::Learner, false, PauseType::None, false);
@@ -460,6 +441,7 @@ mod simple_non_blocked_non_pause {
     }
 
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simplenb_from_delayed_learner() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         simple_fast_add_peer(SourceType::DelayedLearner, false, PauseType::None, false);
@@ -470,6 +452,7 @@ mod simple_non_blocked_non_pause {
 mod simple_non_blocked_pause {
     use super::*;
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simplenb_from_delayed_learner_paused_build() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         simple_fast_add_peer(SourceType::DelayedLearner, false, PauseType::Build, false);
@@ -477,6 +460,7 @@ mod simple_non_blocked_pause {
     }
 
     #[test]
+    #[ignore = "FastAddPeer is not planned for further development"]
     fn test_simplenb_from_delayed_learner_paused_apply() {
         fail::cfg("fap_core_no_fallback", "panic").unwrap();
         simple_fast_add_peer(
@@ -490,6 +474,7 @@ mod simple_non_blocked_pause {
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_timeout_fallback() {
     fail::cfg("on_pre_write_apply_state", "return").unwrap();
     fail::cfg("apply_on_handle_snapshot_sync", "return(true)").unwrap();

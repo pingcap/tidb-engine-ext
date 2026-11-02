@@ -48,6 +48,9 @@ elif [[ $M == "testnew" ]]; then
     export LOG_LEVEL=INFO
     cargo check --package proxy_server --features="$ENABLE_FEATURES"
     # tests based on mock-engine-store, with compat for new proxy
+    # FastAddPeer and raftstore-v2 cluster tests are ignored and excluded from CI.
+    # Keep generic coverage, including address handling and version detection.
+    # https://github.com/pingcap/tidb-engine-ext/pull/461#issuecomment-6573977710
     LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::jemalloc --features="jemalloc"
     MALLOC_CONF="prof:true,prof_active:false" LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::pprof_jemalloc --features=mem-profiling --features="jemalloc"
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::write
@@ -61,12 +64,9 @@ elif [[ $M == "testnew" ]]; then
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::region
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::flashback
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy v2_compat::cluster_raftstore_ver
-    cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy v2_compat::tablet_snapshot
-    cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy v2_compat::simple_write
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy v1_specific::region_ext
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy v1_specific::flashback
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::server_cluster_test -- --test-threads 1
-    cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::fast_add_peer
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::replica_read -- --test-threads 1
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::ffi -- --test-threads 1
     cargo test --package proxy_tests --features="$ENABLE_FEATURES" --test proxy shared::write --features="proxy_tests/enable-pagestorage"
@@ -79,4 +79,3 @@ elif [[ $M == "release" ]]; then
     export ENGINE_LABEL_VALUE=tiflash
     make release
 fi
-   

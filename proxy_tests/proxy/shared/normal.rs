@@ -285,6 +285,7 @@ mod persist {
         let new_states = collect_all_states(&cluster.cluster_ext, region_id);
         must_apply_index_advanced_diff(&prev_states, &new_states, 0);
         fail::remove("on_pre_write_apply_state");
+        cluster.shutdown();
     }
 
     #[test]
@@ -321,5 +322,7 @@ mod persist {
         // index 6 empty command
         // index 7 CommitMerge
         must_altered_disk_apply_index(&prev_states, &new_states, 2);
+
+        cluster.shutdown();
     }
 }

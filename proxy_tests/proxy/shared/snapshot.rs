@@ -88,6 +88,8 @@ fn test_basic_snapshot() {
     // add peer (engine_2,engine_2) to region 1.
     pd_client.must_add_peer(r1, new_peer(2, 2));
     must_get_equal(engine_2, b"k1", b"v");
+
+    cluster.shutdown();
 }
 
 #[test]

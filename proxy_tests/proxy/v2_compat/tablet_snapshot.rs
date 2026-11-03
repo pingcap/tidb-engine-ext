@@ -126,6 +126,7 @@ fn prepare_snapshot(
 }
 
 #[test]
+#[ignore = "raftstore-v2 is not planned for further development"]
 fn test_get_snapshot_seek() {
     let mut cluster_v1 = new_server_cluster(1, 1);
     let mut cluster_v2 = test_raftstore_v2::new_server_cluster(1, 1);
@@ -203,6 +204,7 @@ fn test_get_snapshot_seek() {
 }
 
 #[test]
+#[ignore = "raftstore-v2 is not planned for further development"]
 fn test_get_snapshot_split_keys() {
     let mut cluster_v1 = new_server_cluster(1, 1);
     let mut cluster_v2 = test_raftstore_v2::new_server_cluster(1, 1);
@@ -253,6 +255,7 @@ fn test_get_snapshot_split_keys() {
 }
 
 #[test]
+#[ignore = "raftstore-v2 is not planned for further development"]
 fn test_parse_tablet_snapshot() {
     let test_parse_snap = |key_num| {
         let mut cluster_v1 = new_server_cluster(1, 1);
@@ -362,6 +365,7 @@ fn test_handle_snapshot() {
 }
 
 #[test]
+#[ignore = "raftstore-v2 is not planned for further development"]
 fn test_v1_apply_snap_from_v2() {
     tikv_util::set_panic_hook(true, "./");
     let mut cluster_v1 = new_server_cluster(1, 1);

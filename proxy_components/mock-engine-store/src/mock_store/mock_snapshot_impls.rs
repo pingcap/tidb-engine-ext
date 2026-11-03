@@ -5,7 +5,9 @@ use std::sync::atomic::Ordering;
 use super::{
     common::*,
     mock_core::*,
-    mock_engine_store_server::{into_engine_store_server_wrap, write_to_db_data},
+    mock_engine_store_server::{
+        into_engine_store_server_wrap, write_to_db_data, EngineStoreServerWrap,
+    },
     mock_ffi::*,
 };
 
@@ -88,10 +90,11 @@ pub unsafe extern "C" fn ffi_pre_handle_snapshot(
     index: u64,
     term: u64,
 ) -> interfaces_ffi::RawCppPtr {
-    let store = into_engine_store_server_wrap(arg1);
-    let proxy_helper = &mut *(store.maybe_proxy_helper.unwrap());
-    let _kvstore = &mut (*store.engine_store_server).kvstore;
-    let node_id = (*store.engine_store_server).id;
+    // Prehandle workers only read the wrapper and the proxy helper.
+    let store = arg1.cast::<EngineStoreServerWrap>();
+    let proxy_helper = &*(*store).maybe_proxy_helper.unwrap();
+    let engine_store_server = (*store).engine_store_server;
+    let node_id = (*engine_store_server).id;
 
     let mut region_meta = kvproto::metapb::Region::default();
     assert_ne!(region_buff.data, std::ptr::null());
@@ -111,12 +114,9 @@ pub unsafe extern "C" fn ffi_pre_handle_snapshot(
         "snap len" => snaps.len,
     );
 
-    (*store.engine_store_server).mutate_region_states(
-        region.region.get_id(),
-        |e: &mut RegionStats| {
-            e.pre_handle_count.fetch_add(1, Ordering::SeqCst);
-        },
-    );
+    (*engine_store_server).mutate_region_states(region.region.get_id(), |e: &mut RegionStats| {
+        e.pre_handle_count.fetch_add(1, Ordering::SeqCst);
+    });
 
     for i in 0..snaps.len {
         let snapshot = snaps.views.add(i as usize);

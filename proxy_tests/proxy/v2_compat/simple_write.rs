@@ -8,6 +8,7 @@ use super::utils::*;
 use crate::utils::v1::*;
 
 #[test]
+#[ignore = "raftstore-v2 is not planned for further development"]
 fn test_write_simple() {
     let mut cluster_v2 = test_raftstore_v2::new_node_cluster(1, 2);
     let (mut cluster_v1, _) = new_mock_cluster(1, 2);

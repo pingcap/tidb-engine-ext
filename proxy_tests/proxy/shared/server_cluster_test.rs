@@ -90,6 +90,7 @@ fn test_pprof() {
     }
     block_on(handle).unwrap();
     status_server.stop();
+    cluster.shutdown();
 }
 
 #[test]

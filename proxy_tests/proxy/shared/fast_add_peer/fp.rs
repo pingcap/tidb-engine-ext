@@ -868,12 +868,17 @@ fn test_fall_back_to_slow_path() {
         },
     );
 
-    iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
-        assert_eq!(
-            ffi.engine_store_server_helper
-                .query_fap_snapshot_state(1, 2, 0, 0),
-            proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound
-        );
+    // Data is visible before the snapshot commit hook clears the temporary FAP
+    // snapshot.
+    must_wait_until_cond_generic(&cluster.cluster_ext, 1, Some(vec![2]), &|_| {
+        let mut cleared = false;
+        iter_ffi_helpers(&cluster, Some(vec![2]), &mut |_, ffi: &mut FFIHelperSet| {
+            cleared = ffi
+                .engine_store_server_helper
+                .query_fap_snapshot_state(1, 2, 0, 0)
+                == proxy_ffi::interfaces_ffi::FapSnapshotState::NotFound;
+        });
+        cleared
     });
 
     fail::remove("fap_mock_fail_after_write");

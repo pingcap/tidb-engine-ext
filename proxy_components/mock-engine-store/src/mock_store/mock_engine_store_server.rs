@@ -1,7 +1,6 @@
 // Copyright 2022 TiKV Project Authors. Licensed under Apache-2.0.
 
 use std::{
-    cell::RefCell,
     pin::Pin,
     sync::{atomic::Ordering, Mutex},
 };
@@ -45,7 +44,7 @@ pub struct EngineStoreServer {
     pub engines: Option<Engines<TiFlashEngine, ProxyRaftEngine>>,
     pub kvstore: HashMap<RegionId, Box<MockRegion>>,
     pub mock_cfg: MockConfig,
-    pub region_states: RefCell<HashMap<RegionId, RegionStats>>,
+    pub region_states: Mutex<HashMap<RegionId, RegionStats>>,
     pub page_storage: MockPageStorage,
     // (region_id, peer_id) -> MockRegion
     pub tmp_fap_regions: HashMap<RegionId, Box<MockRegion>>,
@@ -59,7 +58,7 @@ impl EngineStoreServer {
             engines,
             kvstore: Default::default(),
             mock_cfg: MockConfig::default(),
-            region_states: RefCell::new(Default::default()),
+            region_states: Mutex::default(),
             page_storage: Default::default(),
             tmp_fap_regions: Default::default(),
             thread_info_map: Default::default(),
@@ -67,13 +66,7 @@ impl EngineStoreServer {
     }
 
     pub fn mutate_region_states<F: Fn(&mut RegionStats)>(&self, region_id: RegionId, f: F) {
-        let has = self.region_states.borrow().contains_key(&region_id);
-        if !has {
-            self.region_states
-                .borrow_mut()
-                .insert(region_id, Default::default());
-        }
-        f(self.region_states.borrow_mut().get_mut(&region_id).unwrap())
+        self.mutate_region_states_mut(region_id, f);
     }
 
     pub fn mutate_region_states_mut<F: FnMut(&mut RegionStats)>(
@@ -81,13 +74,8 @@ impl EngineStoreServer {
         region_id: RegionId,
         mut f: F,
     ) {
-        let has = self.region_states.borrow().contains_key(&region_id);
-        if !has {
-            self.region_states
-                .borrow_mut()
-                .insert(region_id, Default::default());
-        }
-        f(self.region_states.borrow_mut().get_mut(&region_id).unwrap())
+        let mut states = self.region_states.lock().unwrap();
+        f(states.entry(region_id).or_default());
     }
 
     pub fn get_mem(

@@ -11,6 +11,7 @@ fn setup_fp_for_fap() {
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_disable_fap() {
     tikv_util::set_panic_hook(true, "./");
     let (mut cluster, pd_client) = new_mock_cluster(0, 2);
@@ -76,6 +77,7 @@ fn test_disable_fap() {
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_cancel_after_fap_phase1() {
     tikv_util::set_panic_hook(true, "./");
     let (mut cluster, pd_client) = new_mock_cluster(0, 2);
@@ -119,6 +121,7 @@ fn test_cancel_after_fap_phase1() {
 
 // Test is the cached mem info is well managed in all cases.
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_restart_meta_info() {
     setup_fp_for_fap();
     tikv_util::set_panic_hook(true, "./");
@@ -305,11 +308,13 @@ fn prehandle_snapshot_after_restart(kind: u64) {
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_prehandle_snapshot_after_restart_reset() {
     prehandle_snapshot_after_restart(2);
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_prehandle_snapshot_after_restart_1() {
     prehandle_snapshot_after_restart(1);
 }
@@ -332,6 +337,7 @@ fn test_prehandle_snapshot_after_restart_1() {
 // - post apply old_one [-inf, inf), k1=v1
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_overlap_last_apply_old() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 3);
     pd_client.disable_default_operator();
@@ -463,6 +469,7 @@ fn test_overlap_last_apply_old() {
 // is actually newer.
 // It if origianlly https://github.com/pingcap/tidb-engine-ext/pull/359 before two-stage fap.
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_overlap_apply_tikv_snap_in_the_middle() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 3);
     pd_client.disable_default_operator();
@@ -614,6 +621,7 @@ fn test_overlap_apply_tikv_snap_in_the_middle() {
 
 // If the peer is initialized, it will not use fap to catch up.
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_existing_peer() {
     // Can always apply snapshot immediately
     fail::cfg("apply_on_handle_snapshot_sync", "return(true)").unwrap();
@@ -669,6 +677,7 @@ fn test_existing_peer() {
 
 // We will reject remote peer in Applying state.
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_apply_snapshot() {
     tikv_util::set_panic_hook(true, "./");
     let (mut cluster, pd_client) = new_mock_cluster(0, 3);
@@ -749,6 +758,7 @@ fn test_apply_snapshot() {
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_split_no_fast_add() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 3);
     pd_client.disable_default_operator();
@@ -792,6 +802,7 @@ fn test_split_no_fast_add() {
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_split_merge() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 3);
     pd_client.disable_default_operator();
@@ -906,16 +917,19 @@ fn do_test_fall_back_to_slow_path(reuse_fap_snapshot: bool) {
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_fall_back_to_slow_path_1() {
     do_test_fall_back_to_slow_path(true);
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_fall_back_to_slow_path_0() {
     do_test_fall_back_to_slow_path(false);
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_single_replica_migrate() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 3);
     pd_client.disable_default_operator();
@@ -987,6 +1001,7 @@ fn test_single_replica_migrate() {
 /// MsgAppend. If such MsgSnapshot is received when a FAP snapshot IS BUILDING,
 /// then it will be dropped.
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_msgsnapshot_before_msgappend() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 2);
     pd_client.disable_default_operator();
@@ -1083,6 +1098,7 @@ fn test_msgsnapshot_before_msgappend() {
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_replay_fap_after_post_apply() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 2);
     // If we return prematurely by `region_apply_snap`, `status` maybe switched to
@@ -1151,6 +1167,7 @@ fn test_replay_fap_after_post_apply() {
 }
 
 #[test]
+#[ignore = "FastAddPeer is not planned for further development"]
 fn test_replay_fap_before_post_apply() {
     let (mut cluster, pd_client) = new_mock_cluster_snap(0, 2);
     cluster.mut_config().raft_store.raft_log_gc_count_limit = Some(1000);
